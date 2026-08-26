@@ -1,10 +1,25 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { existsSync, readFileSync, rmSync } from 'node:fs'
+import path from 'node:path'
 import test from 'node:test'
 import vm from 'node:vm'
 
 const pluginSource = readFileSync(new URL('../plugin.js', import.meta.url), 'utf8')
+
+function shellExecutable() {
+  if (process.platform !== 'win32') {
+    return 'sh'
+  }
+
+  const programFiles = process.env.ProgramW6432 || process.env.ProgramFiles || 'C:\\Program Files'
+  const candidates = [
+    path.join(programFiles, 'Git', 'bin', 'bash.exe'),
+    path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Git', 'bin', 'bash.exe')
+  ]
+
+  return candidates.find(candidate => existsSync(candidate)) || 'sh'
+}
 
 function load(request = async () => ({ jobs: [] })) {
   const values = new Map()
@@ -58,9 +73,9 @@ test('security: delegated routine arguments remain literal shell values', () => 
   const prompt = __routines.routinePrompt('research', title, instruction, 'default')
   const command = prompt.slice(prompt.indexOf('hermes '), prompt.lastIndexOf('\n\nIf the command'))
   const script = `hermes() { printf '%s\\037' "$@"; }\n${command}`
-  const result = spawnSync('sh', ['-c', script], { encoding: 'utf8' })
+  const result = spawnSync(shellExecutable(), ['-c', script], { encoding: 'utf8' })
 
-  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.status, 0, result.error?.message ?? result.stderr ?? 'shell failed')
   assert.deepEqual(result.stdout.split('\x1f').slice(0, -1), [
     '-p',
     'research',
@@ -138,8 +153,8 @@ test('security: upgrade pauses persisted delegated routines before they can exec
   assert.equal(runtime.__routines.isLegacyDelegatedRoutine({ ...persisted, prompt_preview: recreated.slice(0, 100) }), false)
   const command = recreated.slice(recreated.indexOf('hermes '), recreated.lastIndexOf('\n\nIf the command'))
   const script = `hermes() { printf '%s\\037' "$@"; }\n${command}`
-  const executed = spawnSync('sh', ['-c', script], { encoding: 'utf8' })
-  assert.equal(executed.status, 0, executed.stderr)
+  const executed = spawnSync(shellExecutable(), ['-c', script], { encoding: 'utf8' })
+  assert.equal(executed.status, 0, executed.error?.message ?? executed.stderr ?? 'shell failed')
   assert.deepEqual(executed.stdout.split('\x1f').slice(0, -1), [
     '-p',
     'research',

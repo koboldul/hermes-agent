@@ -6,10 +6,10 @@ import path from 'node:path'
 import { describe, test } from 'vitest'
 
 import {
-  supplyChainAllowsUnverified,
+  atomicSwapWithRollback,
   desktopActivationDecision,
   desktopBundleDigest,
-  atomicSwapWithRollback
+  supplyChainAllowsUnverified
 } from './desktop-plugin-install'
 
 describe('desktop plugin atomic publication (WP4 item 2: backup + rollback)', () => {
@@ -52,7 +52,9 @@ describe('desktop plugin atomic publication (WP4 item 2: backup + rollback)', ()
         // First rename (target->backup) succeeds; second (stage->target) throws.
         rename: async (a, b) => {
           call += 1
-          if (call === 2) throw new Error('simulated rename failure')
+          if (call === 2) {
+            throw new Error('simulated rename failure')
+          }
           await fsp.rename(a, b)
         },
         rm: (p) => fsp.rm(p, { recursive: true, force: true }).then(() => undefined)

@@ -399,7 +399,9 @@ async function copyDesktopTree(sourceDir: string, targetDir: string): Promise<vo
 function extractSupplyChainBlock(text: string): string | null {
   const lines = text.split(/\r?\n/)
   const start = lines.findIndex(l => /^\s*supply_chain\s*:/.test(l))
-  if (start < 0) return null
+  if (start < 0) {
+    return null
+  }
   const indent = lines[start].match(/^(\s*)/)?.[1].length ?? 0
   const out: string[] = []
   for (let j = start + 1; j < lines.length; j++) {
@@ -409,7 +411,9 @@ function extractSupplyChainBlock(text: string): string | null {
       continue
     }
     const lineIndent = line.match(/^(\s*)/)?.[1].length ?? 0
-    if (lineIndent <= indent) break
+    if (lineIndent <= indent) {
+      break
+    }
     out.push(line)
   }
   return out.join('\n')
@@ -417,11 +421,15 @@ function extractSupplyChainBlock(text: string): string | null {
 
 export function supplyChainAllowsUnverified(component: string, configText: string): boolean {
   const block = extractSupplyChainBlock(configText)
-  if (!block) return false
+  if (!block) {
+    return false
+  }
   // `enforce: false` alone must NOT authorize (WP4 item 5): authorization
   // always requires the explicit per-component allow-list (or the "*" sentinel).
   const listMatch = block.match(/allow_unverified_components\s*:\s*(\[[^\]]*\]|(?:\r?\n\s+-\s+[^\r\n]+)+)/i)
-  if (!listMatch) return false
+  if (!listMatch) {
+    return false
+  }
   const listText = listMatch[1].toLowerCase()
   const wanted = component.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   return new RegExp(`(^|[\\[,"'\\s-])(${wanted}|\\*)([\\],"'\\s]|$)`).test(listText)
@@ -454,10 +462,15 @@ export async function desktopBundleDigest(dir: string): Promise<string> {
     for (const it of items) {
       const relPath = rel ? `${rel}/${it.name}` : it.name
       const parts = relPath.split('/')
-      if (parts.includes('.git') || parts.includes('__pycache__') || parts.includes('node_modules')) continue
+      if (parts.includes('.git') || parts.includes('__pycache__') || parts.includes('node_modules')) {
+        continue
+      }
       const abs = path.join(cur, it.name)
-      if (it.isDirectory()) await walk(abs, relPath)
-      else if (it.isFile()) entries.push(relPath)
+      if (it.isDirectory()) {
+        await walk(abs, relPath)
+      } else if (it.isFile()) {
+        entries.push(relPath)
+      }
     }
   }
   await walk(dir, '')
@@ -663,12 +676,16 @@ export async function installDesktopPluginFromGit(
       if (!(await pathIsFile(targetPlugin))) {
         // Published tree is broken — restore the backup and fail closed.
         await fsp.rm(targetDir, { recursive: true, force: true }).catch(() => undefined)
-        if (movedAside) await fsp.rename(backupDir, targetDir).catch(() => undefined)
+        if (movedAside) {
+          await fsp.rename(backupDir, targetDir).catch(() => undefined)
+        }
         return { ok: false, error: `Install completed but ${targetPlugin} is missing — previous install restored.` }
       }
 
       // Success: discard the backup.
-      if (movedAside) await fsp.rm(backupDir, { recursive: true, force: true }).catch(() => undefined)
+      if (movedAside) {
+        await fsp.rm(backupDir, { recursive: true, force: true }).catch(() => undefined)
+      }
 
       return { ok: true, pluginName, path: targetDir, digest: computedDigest }
     } finally {
