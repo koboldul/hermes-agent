@@ -1,11 +1,18 @@
 # Rust / Cargo
 /src-tauri/target/
-/src-tauri/Cargo.lock
+# Cargo.lock IS tracked (A3): a signed installer must build from a pinned,
+# reviewed dependency graph. Every Tauri test/build/release runs with --locked
+# (--frozen in release CI) so the graph can never re-resolve unpinned.
 
 # Vite / build output
 /dist/
 /dist-ssr/
 *.local
+
+# B2: default persistent output dir for `node scripts/release-build.mjs`
+# (release artifacts copied out of the throwaway staging worktree). Gitignored
+# so it never trips release-build's clean-closure pre-check on apps/bootstrap-installer.
+/release/
 
 # TypeScript build info + tsc emit (we don't ship .js for the
 # vite.config.ts; Vite reads it directly via ts-node-style loader).

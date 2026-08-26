@@ -242,6 +242,35 @@ def _hermes_bin_dir() -> str:
     return d
 
 
+def _managed_tirith_marked(path: str) -> bool:
+    """A6: a managed tirith is usable only with a current provenance marker
+    whose digest matches its bytes; an unmarked/tampered binary is ignored."""
+    try:
+        from hermes_cli.supply_chain.managed import managed_ok
+
+        return managed_ok(path, component="tirith")
+    except Exception:
+        return False
+
+
+def _operator_tirith() -> str | None:
+    """Operator-PATH tirith, with the A6 alias-bypass defence.
+
+    ``shutil.which`` can return a PATH/symlink/junction/case alias that lands on
+    the (unmarked) managed tirith; that is not a genuine operator binary and
+    must not be executed unless its marker verifies.
+    """
+    found = shutil.which("tirith")
+    if not found:
+        return None
+    try:
+        from hermes_cli.supply_chain.managed import accept_operator_path
+
+        return accept_operator_path(found, component="tirith")
+    except Exception:
+        return found
+
+
 def _detect_target() -> str | None:
     """Return the Rust target triple for the current platform, or None.
 
@@ -399,6 +428,24 @@ def _install_tirith(*, log_failures: bool = True) -> tuple[str | None, str]:
                      platform.system(), platform.machine())
         return None, "unsupported_platform"
 
+    # Supply-chain gate (WP4): tirith is resolved as releases/latest (mutable);
+    # its checksums arrive over the same channel. Disabled by default. tirith is
+    # optional — Hermes falls back to pattern-matching guards — so failing
+    # closed degrades gracefully. Explicit opt-in required to auto-install.
+    try:
+        from hermes_cli.supply_chain.gate import compat_opt_in
+
+        _tirith_compat = compat_opt_in("tirith")
+    except Exception:
+        _tirith_compat = False
+    if not _tirith_compat:
+        logger.info(
+            "tirith auto-install disabled by default (supply-chain enforce); "
+            "using pattern-matching guards. Allow it in config: "
+            "security.supply_chain.allow_unverified_components: [\"tirith\"]."
+        )
+        return None, "supply_chain_enforced"
+
     archive_name = f"tirith-{target}.tar.gz"
     base_url = f"https://github.com/{_REPO}/releases/latest/download"
 
@@ -477,6 +524,16 @@ def _install_tirith(*, log_failures: bool = True) -> tuple[str | None, str]:
                 return None, "cross_device_copy_failed"
         os.chmod(dest, os.stat(dest).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
+        # A6: record a provenance marker so this managed tirith is trusted on
+        # the next resolve (an unmarked legacy binary would be ignored).
+        try:
+            from hermes_cli.supply_chain.managed import write_marker
+
+            write_marker(dest, component="tirith", version="installed",
+                         provenance="operator_compat_opt_in")
+        except Exception as exc:  # pragma: no cover - marker best-effort
+            logger.warning("could not write tirith provenance marker: %s", exc)
+
         verification = "cosign + SHA-256" if cosign_verified else "SHA-256 only"
         logger.info("tirith installed to %s (%s)", dest, verification)
         return dest, ""
@@ -542,7 +599,7 @@ def _resolve_tirith_path(configured_path: str) -> str:
     # Default "tirith" — always re-run cheap local checks so a manual
     # install is picked up even after a previous network failure (P2 fix:
     # long-lived gateway/CLI recovers without restart).
-    found = shutil.which("tirith")
+    found = _operator_tirith()
     if found:
         _resolved_path = found
         _install_failure_reason = ""
@@ -550,7 +607,7 @@ def _resolve_tirith_path(configured_path: str) -> str:
         return found
 
     hermes_bin = os.path.join(_hermes_bin_dir(), "tirith")
-    if os.path.isfile(hermes_bin) and os.access(hermes_bin, os.X_OK):
+    if os.path.isfile(hermes_bin) and os.access(hermes_bin, os.X_OK) and _managed_tirith_marked(hermes_bin):
         _resolved_path = hermes_bin
         _install_failure_reason = ""
         _clear_install_failed()
@@ -607,17 +664,25 @@ def _background_install(*, log_failures: bool = True):
             return
 
         # Re-check local paths (may have been installed by another process)
-        found = shutil.which("tirith")
+        found = _operator_tirith()
         if found:
             _resolved_path = found
             _install_failure_reason = ""
             return
 
         hermes_bin = os.path.join(_hermes_bin_dir(), "tirith")
-        if os.path.isfile(hermes_bin) and os.access(hermes_bin, os.X_OK):
+        if os.path.isfile(hermes_bin) and os.access(hermes_bin, os.X_OK) and _managed_tirith_marked(hermes_bin):
             _resolved_path = hermes_bin
             _install_failure_reason = ""
             return
+        # A6: an unmarked/tampered managed tirith is quarantined BEFORE the
+        # installer fallback so it can never be resolved or executed.
+        try:
+            from hermes_cli.supply_chain.managed import quarantine_unmarked
+
+            quarantine_unmarked(hermes_bin, component="tirith")
+        except Exception:
+            pass
 
         installed, reason = _install_tirith(log_failures=log_failures)
         if installed:
@@ -646,7 +711,17 @@ def ensure_installed(*, log_failures: bool = True):
     # Already resolved from a previous call
     if _resolved_path is not None and _resolved_path is not _INSTALL_FAILED:
         path = _resolved_path
-        if os.path.isfile(path) and os.access(path, os.X_OK):
+        # A6: re-verify a MANAGED tirith's provenance marker on every recheck —
+        # a cached managed path whose marker was since removed/tampered is
+        # refused (not returned on existence alone). Operator paths are used
+        # in place and need no marker.
+        _hb = os.path.join(_hermes_bin_dir(), "tirith")
+        _is_managed = os.path.abspath(path) == os.path.abspath(_hb)
+        if (
+            os.path.isfile(path)
+            and os.access(path, os.X_OK)
+            and (not _is_managed or _managed_tirith_marked(path))
+        ):
             return path
         return None
 
@@ -676,7 +751,7 @@ def ensure_installed(*, log_failures: bool = True):
         return None
 
     # Default "tirith" — quick local checks first (no network)
-    found = shutil.which("tirith")
+    found = _operator_tirith()
     if found:
         _resolved_path = found
         _install_failure_reason = ""
@@ -684,7 +759,7 @@ def ensure_installed(*, log_failures: bool = True):
         return found
 
     hermes_bin = os.path.join(_hermes_bin_dir(), "tirith")
-    if os.path.isfile(hermes_bin) and os.access(hermes_bin, os.X_OK):
+    if os.path.isfile(hermes_bin) and os.access(hermes_bin, os.X_OK) and _managed_tirith_marked(hermes_bin):
         _resolved_path = hermes_bin
         _install_failure_reason = ""
         _clear_install_failed()

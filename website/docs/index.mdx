@@ -75,6 +75,15 @@ The self-improving AI agent built by [Nous Research](https://nousresearch.com). 
 
 ## Install
 
+:::warning Prerequisite: install `uv` first
+Hermes builds its Python environment with [`uv`](https://docs.astral.sh/uv/) and, for supply-chain safety, the installer uses an operator-installed `uv` instead of auto-downloading it. Install `uv` before running anything below (verify with `uv --version`):
+
+- **Linux / macOS / WSL2:** `pipx install uv` or `brew install uv`
+- **Windows (native, PowerShell):** `winget install astral-sh.uv`
+
+If `uv`, Node.js, or Git are missing the installer stops with the exact fix. **Android/Termux is exempt** (it uses `pip`, not `uv`). See the [Installation Guide](/getting-started/installation) for details.
+:::
+
 ### Windows or macOS
 
 To easily install the command-line and desktop applications, [download the Hermes Desktop installer](https://hermes-agent.nousresearch.com/) from our website and run it.

@@ -1,7 +1,9 @@
+import { useStore } from '@nanostores/react'
 import { type ReactNode, useEffect, useState } from 'react'
 
 import { Loader2 } from '@/lib/icons'
 import { cn } from '@/lib/utils'
+import { $resolveLinkMetadata } from '@/store/link-metadata'
 
 /**
  * A site's icon, resolved the thorough way.
@@ -35,6 +37,10 @@ export function Favicon({
 }) {
   const [icon, setIcon] = useState(() => (url ? (resolved.get(url) ?? '') : ''))
   const [pending, setPending] = useState(false)
+  // Remote favicon discovery is opt-in (SEC-AUDIT-003): with the setting off,
+  // rendering a remote candidate makes NO request — the caller's local monogram
+  // / brand fallback shows instead. A previously resolved icon still paints.
+  const auto = useStore($resolveLinkMetadata)
 
   useEffect(() => {
     const resolveFavicon = window.hermesDesktop?.resolveFavicon
@@ -50,6 +56,14 @@ export function Favicon({
 
     if (cached !== undefined) {
       setIcon(cached)
+      setPending(false)
+
+      return
+    }
+
+    if (!auto) {
+      // Not opted in: no network request, keep the fallback.
+      setIcon('')
       setPending(false)
 
       return
@@ -73,7 +87,7 @@ export function Favicon({
     return () => {
       live = false
     }
-  }, [url])
+  }, [auto, url])
 
   return (
     <span className={cn('inline-grid size-full place-items-center', className)} title={title}>

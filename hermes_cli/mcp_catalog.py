@@ -448,6 +448,24 @@ def _run_bootstrap(cwd: Path, commands: List[str]) -> None:
     Each command runs through the shell (so `&&` etc. work). The output is
     streamed to the user's terminal for visibility.
     """
+    # Supply-chain gate (WP4): bootstrap commands install unpinned, unhashed
+    # dependency graphs. Disabled by default; requires an explicit operator
+    # opt-in (or, in future, a committed hash-locked graph).
+    if commands:
+        try:
+            from hermes_cli.supply_chain.gate import compat_opt_in
+
+            _mcp_ok = compat_opt_in("mcp-bootstrap")
+        except Exception:
+            _mcp_ok = False
+        if not _mcp_ok:
+            raise CatalogError(
+                "MCP bootstrap dependency install is disabled by default "
+                "(supply-chain enforce): the bootstrap commands install unpinned, "
+                "unhashed packages. Allow it in config: security.supply_chain."
+                "allow_unverified_components: [\"mcp-bootstrap\"]. See "
+                "docs/security/supply-chain-migration.md."
+            )
     for cmd in commands:
         print(color(f"  $ {cmd}", Colors.DIM))
         proc = subprocess.run(cmd, cwd=str(cwd), shell=True)

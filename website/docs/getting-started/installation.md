@@ -14,6 +14,16 @@ platform-gated features are supported), see **[Platform Support](./platform-supp
 :::
 
 ## Quick Install
+
+:::warning Prerequisite: install `uv` first
+Hermes builds its Python environment with [`uv`](https://docs.astral.sh/uv/) (Astral's package manager). For supply-chain safety the installer **uses an operator-installed `uv` and will not auto-download it** — if `uv` is missing it stops with the exact command to run instead of silently fetching an unverified binary. Install it before running any command below:
+
+- **Linux / macOS / WSL2:** `pipx install uv` — or `brew install uv` — or the [official uv install guide](https://docs.astral.sh/uv/getting-started/installation/).
+- **Windows (native, PowerShell):** `winget install astral-sh.uv`
+
+Verify with `uv --version`. Node.js and Git follow the same rule — install them with your OS/version manager if the installer reports them missing. **Android/Termux is exempt** — it uses Python's stdlib `venv` + `pip` instead of `uv`. The break-glass flags (`--allow-unverified-bootstrap` / `-AllowUnverifiedBootstrap`) let the installer fetch these from unverified upstreams and are **not** recommended; see the [supply-chain migration guide](https://github.com/NousResearch/hermes-agent/blob/main/docs/security/supply-chain-migration.md).
+:::
+
 ### With the Hermes Desktop installer on macOS or Windows (recommended)
 To easily install the command-line and desktop applications, [download the Hermes Desktop installer](https://hermes-agent.nousresearch.com/) from our website and run it.
 
@@ -39,7 +49,7 @@ hermes desktop
 
 ### What the Installer Does
 
-The installer handles everything automatically — all dependencies (Python, Node.js, ripgrep, ffmpeg), the repo clone, virtual environment, global `hermes` command setup, and LLM provider configuration. By the end, you're ready to chat.
+The installer handles the rest automatically — the remaining dependencies (Python, ripgrep, ffmpeg), the repo clone, virtual environment, global `hermes` command setup, and LLM provider configuration. It relies on an operator-installed `uv` (see the prerequisite above) and, like Node.js and Git, stops with an actionable message rather than fetching unverified binaries if one is missing. By the end, you're ready to chat.
 
 #### Install Layout
 
@@ -90,16 +100,15 @@ You don't need to rebuild your setup from scratch. Restore a full backup with `h
 
 ## Prerequisites
 
-**Installer:** On non-Windows platforms, the only prerequisite is **Git**. On Linux, also make sure `curl` and `xz-utils` are available (the installer downloads Node.js as a `.tar.xz` archive). The desktop app additionally requires `g++` (or `build-essential` on Debian/Ubuntu) to compile native modules. The installer automatically handles everything else:
+**Installer:** You must install **`uv`** yourself before running the installer — for supply-chain safety it will not auto-download `uv`, and it stops with the exact command if `uv` is missing (`pipx install uv`, `brew install uv`, or `winget install astral-sh.uv`; verify with `uv --version`). **Android/Termux is exempt** — it builds the environment with Python's stdlib `venv` + `pip` and needs no `uv`. Beyond that, on non-Windows platforms the remaining prerequisite is **Git**. On Linux, also make sure `curl` and `xz-utils` are available (the installer downloads Node.js as a `.tar.xz` archive). The desktop app additionally requires `g++` (or `build-essential` on Debian/Ubuntu) to compile native modules. With `uv` present, the installer handles the rest:
 
-- **uv** (fast Python package manager)
 - **Python 3.11** (via uv, no sudo needed)
 - **Node.js v22** (for browser automation and WhatsApp bridge)
 - **ripgrep** (fast file search)
 - **ffmpeg** (audio format conversion for TTS)
 
 :::info
-You do **not** need to install Python, Node.js, ripgrep, or ffmpeg manually. The installer detects what's missing and installs it for you. Just make sure `git` is available (`git --version`). On Linux, ensure `curl` and `xz-utils` are installed (`sudo apt install curl xz-utils` on Debian/Ubuntu). For the desktop app, also install `build-essential` (`sudo apt install build-essential`).
+Install **`uv`** first (`pipx install uv` / `brew install uv` / `winget install astral-sh.uv`). After that you do **not** need to install Python, ripgrep, or ffmpeg manually — the installer detects what's missing and installs it for you. Make sure `git` is available (`git --version`); if Node.js or Git are missing the installer prints the exact command to install them rather than fetching unverified binaries. On Linux, ensure `curl` and `xz-utils` are installed (`sudo apt install curl xz-utils` on Debian/Ubuntu). For the desktop app, also install `build-essential` (`sudo apt install build-essential`).
 :::
 
 :::tip Nix users

@@ -80,6 +80,15 @@ SESSION_RT_COOKIE = "hermes_session_rt"
 # refresh token from being handed to the wrong provider when several dashboard
 # auth plugins are enabled (for example Basic + Nous OAuth).
 SESSION_PROVIDER_COOKIE = "hermes_session_provider"
+# Stable per-session CSRF-binding value for provider (OAuth/password) sessions.
+# Set ONCE (minted by ``GET /api/auth/csrf``) and NEVER rotated, so an
+# access/refresh-token rotation does not invalidate the derived anti-CSRF
+# token. HttpOnly (never exposed to JS — only the HMAC-derived token is) and
+# accompanies the session cookies. Its presence, alongside the access/refresh/
+# provider cookies, is what classifies a request as cookie-authenticated so a
+# *refresh-only* unsafe request (access cookie absent, refresh cookie present)
+# still requires CSRF instead of bypassing it (SEC-AUDIT-001 Alert 1).
+SESSION_CSRF_COOKIE = "hermes_session_csrf"
 PKCE_COOKIE = "hermes_session_pkce"
 # One-shot loop-guard marker for the auto-SSO redirect (Phase 1,
 # cloud-auto-discovery). Set when the gate auto-initiates the portal OAuth
@@ -274,7 +283,8 @@ def clear_session_cookies(response: Response, *, prefix: str = "") -> None:
     bare_attrs = {
         "path": _cookie_path(prefix), "httponly": True, "samesite": "lax",
     }
-    for name in (SESSION_AT_COOKIE, SESSION_RT_COOKIE, SESSION_PROVIDER_COOKIE):
+    for name in (SESSION_AT_COOKIE, SESSION_RT_COOKIE, SESSION_PROVIDER_COOKIE,
+                 SESSION_CSRF_COOKIE):
         _clear_cookie_variants(
             response, name,
             prefix=prefix, https_samesite="lax", bare_attrs=bare_attrs,
@@ -363,6 +373,30 @@ def read_session_cookies(request: Request) -> Tuple[Optional[str], Optional[str]
 def read_session_provider(request: Request) -> Optional[str]:
     """Return the provider routing hint associated with the session cookies."""
     return _read_with_fallback(request, SESSION_PROVIDER_COOKIE)
+
+
+def read_csrf_cookie(request: Request) -> Optional[str]:
+    """Return the stable per-session CSRF-binding value, or None."""
+    return _read_with_fallback(request, SESSION_CSRF_COOKIE)
+
+
+def set_csrf_cookie(
+    response: Response, *, value: str, use_https: bool, prefix: str = "",
+) -> None:
+    """Persist the stable per-session CSRF-binding value (provider sessions).
+
+    Minted once by ``GET /api/auth/csrf`` and NEVER rotated, so the anti-CSRF
+    token derived from it survives access/refresh-token rotation. HttpOnly and
+    ``SameSite=Lax`` to accompany the session cookies; ``Secure`` over HTTPS.
+    The value is opaque and never leaves the process except as this cookie —
+    the browser only ever sees the HMAC-derived token, not this value.
+    """
+    response.set_cookie(
+        _resolved_name(SESSION_CSRF_COOKIE, use_https=use_https, prefix=prefix),
+        value,
+        max_age=_RT_MAX_AGE,
+        **_common_attrs(use_https=use_https, prefix=prefix),
+    )
 
 
 def read_pkce_cookie(request: Request) -> Optional[str]:

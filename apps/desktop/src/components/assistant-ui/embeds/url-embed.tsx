@@ -26,8 +26,10 @@ function intrinsicHeight(descriptor: EmbedDescriptor): number {
 }
 
 function LazyRenderer({ descriptor }: { descriptor: EmbedDescriptor }) {
-  // X and Instagram load their official blockquote script in-document. The tweet
-  // check also narrows the union to FrameEmbed for the iframe renderers below.
+  // X/Twitter and Instagram have no cross-origin iframe embed — only a mutable
+  // widget script we never run in the privileged renderer, so they degrade to an
+  // INERT self-hosted link card (see social-embed.tsx). The tweet check also
+  // narrows the union to FrameEmbed for the iframe renderers below.
   if (descriptor.renderer === 'tweet' || descriptor.provider === 'instagram') {
     return <SocialEmbedRenderer descriptor={descriptor} />
   }
@@ -58,6 +60,12 @@ export function UrlEmbed({ descriptor }: { descriptor: EmbedDescriptor }) {
   const consented = mode === 'always' || loaded || allowed.includes(descriptor.provider)
   const aspect = descriptor.aspectRatio
 
+  // Inert social cards make no third-party request (SEC-AUDIT-005), so the
+  // privacy facade does not apply to them — render directly regardless of the
+  // consent mode or any legacy per-provider "always allow" grant.
+  const inertSocial = descriptor.renderer === 'tweet' || descriptor.provider === 'instagram'
+  const showEmbed = inertSocial || consented
+
   // Ratio embeds cap WIDTH off the ratio so height tops out at the cap while
   // scaling. Non-ratio embeds own their own height (measured / fixed).
   const style: CSSProperties = {
@@ -71,7 +79,7 @@ export function UrlEmbed({ descriptor }: { descriptor: EmbedDescriptor }) {
   return (
     <span className="group/embed my-2 block overflow-hidden rounded-lg" data-slot="aui_embed-card" style={style}>
       <RichBoundary fallback={<EmbedFail label={descriptor.label} />} resetKey={descriptor.id}>
-        {consented ? (
+        {showEmbed ? (
           <Suspense fallback={null}>
             <LazyRenderer descriptor={descriptor} />
           </Suspense>

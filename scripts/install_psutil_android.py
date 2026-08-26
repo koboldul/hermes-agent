@@ -72,6 +72,32 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    # Supply-chain gate (WP4): downloads and builds the psutil sdist (executes
+    # the build backend). No committed digest, so disabled by default. The
+    # operator allows it in config: security.supply_chain.
+    # allow_unverified_components: ["android-psutil"].
+    try:
+        import sys as _sys
+        from pathlib import Path as _P
+
+        _repo = _P(__file__).resolve().parents[1]
+        if str(_repo) not in _sys.path:
+            _sys.path.insert(0, str(_repo))
+        from hermes_cli.supply_chain.gate import compat_opt_in
+
+        _psutil_ok = compat_opt_in("android-psutil")
+    except Exception:
+        _psutil_ok = False
+    if not _psutil_ok:
+        print(
+            "✗ Android psutil auto-build is disabled by default (supply-chain "
+            "enforce): it downloads and builds an unpinned sdist. Allow it in "
+            "config: security.supply_chain.allow_unverified_components: "
+            "[\"android-psutil\"]. See docs/security/supply-chain-migration.md.",
+            file=sys.stderr,
+        )
+        return 1
+
     install_cmd_prefix = _resolve_install_cmd(args.pip, args.uv)
 
     print(

@@ -1,0 +1,54 @@
+{
+  "_doc": "Machine-readable manifest of the executable components INCLUDED in the published release Docker image, and those deliberately EXCLUDED. scripts/ci/check_release_publish.py fails closed if any included component is not release_verified or lock-anchored, if a transport_trusted component is included, or if the browser payload is not excluded. Each anchor is cross-checked against the real Dockerfile / lockfiles.",
+  "image": "nousresearch/hermes-agent",
+  "included_components": [
+    {
+      "name": "debian-base",
+      "trust": "release_verified",
+      "anchor": "dockerfile_from_sha256",
+      "detail": "FROM debian:13.4@sha256:… (sqlite_build + final stage)"
+    },
+    {
+      "name": "uv-runtime",
+      "trust": "release_verified",
+      "anchor": "dockerfile_from_sha256",
+      "detail": "FROM ghcr.io/astral-sh/uv:…@sha256:… (uv_source stage)"
+    },
+    {
+      "name": "node-runtime",
+      "trust": "release_verified",
+      "anchor": "dockerfile_from_sha256",
+      "detail": "FROM node:26-bookworm-slim@sha256:… (node_source stage)"
+    },
+    {
+      "name": "s6-overlay",
+      "trust": "release_verified",
+      "anchor": "dockerfile_arg_sha256",
+      "detail": "S6_OVERLAY_*_SHA256 ARGs verified before extraction"
+    },
+    {
+      "name": "sqlite",
+      "trust": "release_verified",
+      "anchor": "dockerfile_arg_sha256",
+      "detail": "SQLITE_SHA256 ARG verified before build"
+    },
+    {
+      "name": "python-deps",
+      "trust": "lock_anchored",
+      "anchor": "uv_lock",
+      "detail": "uv sync --locked against committed uv.lock (hashes)"
+    },
+    {
+      "name": "npm-deps",
+      "trust": "lock_anchored",
+      "anchor": "package_lock",
+      "detail": "npm install against committed package-lock.json (sha512 integrity)"
+    }
+  ],
+  "excluded_components": [
+    {
+      "name": "playwright-browser",
+      "reason": "Unverified browser payload with no committed archive digest. Absent from the release image; resolved at runtime through the gated agent-browser path when the operator opts in. Bake it only after pinning exact Playwright browser archive digests in supply-chain/manifest.json."
+    }
+  ]
+}

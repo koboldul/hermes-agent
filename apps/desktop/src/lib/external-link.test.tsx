@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { IS_MAC } from '@/lib/keybinds/combo'
+import { $resolveLinkMetadata } from '@/store/link-metadata'
 import { $previewTabs, closeRightRail } from '@/store/preview'
 
 import {
@@ -40,6 +41,7 @@ function installTitleBridge(title: string) {
 afterEach(() => {
   __resetLinkTitleCache()
   closeRightRail()
+  $resolveLinkMetadata.set(false)
   vi.restoreAllMocks()
   cleanup()
 
@@ -185,6 +187,7 @@ describe('external link helpers', () => {
   })
 
   it('renders pretty links with fetched titles and no host suffix', async () => {
+    $resolveLinkMetadata.set(true)
     const bridge = vi.fn().mockResolvedValue('From Fajardo: Full-Day Culebra Islands Catamaran Tour')
     installDesktopBridge({ fetchLinkTitle: bridge as unknown as Window['hermesDesktop']['fetchLinkTitle'] })
 
@@ -214,6 +217,7 @@ describe('external link helpers', () => {
   })
 
   it('ignores error-like fetched titles and falls back to slug label', async () => {
+    $resolveLinkMetadata.set(true)
     const bridge = vi.fn().mockResolvedValue('GetYourGuide – Error')
     installDesktopBridge({ fetchLinkTitle: bridge as unknown as Window['hermesDesktop']['fetchLinkTitle'] })
 
@@ -251,6 +255,7 @@ describe('external link helpers', () => {
   })
 
   it('still resolves a title when no label was authored', async () => {
+    $resolveLinkMetadata.set(true)
     const bridge = installTitleBridge('Homelab Ops Issue 101')
 
     render(<PrettyLink href={FORGEJO_URL} />)
@@ -259,6 +264,31 @@ describe('external link helpers', () => {
       expect(screen.getByTitle(FORGEJO_URL).textContent).toContain('Homelab Ops Issue 101')
     })
     expect(bridge).toHaveBeenCalledTimes(1)
+  })
+
+  // SEC-AUDIT-003: rendering an attacker-controlled link must trigger zero
+  // network requests under the secure default.
+  it('does not fetch a title on render when link previews are off (default)', async () => {
+    const bridge = installTitleBridge('Homelab Ops Issue 101')
+
+    render(<PrettyLink href={FORGEJO_URL} />)
+
+    const link = screen.getByTitle(FORGEJO_URL)
+    // Shows the slug fallback, never reaches out.
+    expect(link.textContent).toContain('Issues')
+    // Give any (incorrect) effect a chance to fire.
+    await Promise.resolve()
+    expect(bridge).not.toHaveBeenCalled()
+  })
+
+  it('resolves exactly once after the user opts into link previews', async () => {
+    $resolveLinkMetadata.set(true)
+    const bridge = installTitleBridge('Opted In Title')
+
+    render(<PrettyLink href={FORGEJO_URL} />)
+
+    await waitFor(() => expect(bridge).toHaveBeenCalledTimes(1))
+    expect(screen.getByTitle(FORGEJO_URL).textContent).toContain('Opted In Title')
   })
 
   it('normalizes scheme-less links before opening', () => {

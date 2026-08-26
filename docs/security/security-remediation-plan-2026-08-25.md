@@ -1,5 +1,13 @@
 # Security Remediation Plan - 2026-08-25
 
+## Document status
+
+This plan was corrected after security-architecture review on 2026-08-25.
+The audit and this plan are already public on the repository's default branch,
+so disclosure is in progress. Maintainers must coordinate an advisory and fixed
+release schedule from that state; this document must not describe exploit
+details as still private.
+
 ## Purpose
 
 This plan remediates the verified findings and hardening gaps in
@@ -12,8 +20,10 @@ The plan follows four repository rules:
    conversation.
 2. Keep capability at existing edges; none of these fixes requires a new model
    tool.
-3. Reuse the existing authentication, subprocess-environment, configuration,
-   and testing surfaces instead of creating parallel frameworks.
+3. Reuse the existing authentication, configuration, and testing surfaces.
+   Extend subprocess-environment infrastructure with a purpose-specific
+   restricted builder where the existing inherited-environment policy is not a
+   sufficient boundary.
 4. Fix the complete class: sibling routes, redirects, subprocesses, profiles,
    and supported platforms must receive the same protection.
 
@@ -24,8 +34,11 @@ The remediation is complete when:
 - unauthenticated dashboard assets contain no reusable authorization material;
 - browser dashboard sessions require proof of a non-public launch credential or
   configured external authentication;
-- LSP installers and servers never receive undeclared Hermes credentials;
+- LSP installers and servers receive only a declared, purpose-specific
+  environment rather than an inherited environment with known secrets removed;
 - every auto-installed LSP dependency is immutable and reviewable;
+- LSP auto-install runs only after affirmative consent recorded for the current
+  install policy version;
 - Desktop makes no automatic external request merely because a URL was
   rendered under the secure default; any opt-in is explicit and still subject
   to the main-process destination policy;
@@ -33,10 +46,14 @@ The remediation is complete when:
   or rebind to non-public network space;
 - no remote script executes in a Desktop renderer that owns Hermes preload
   capabilities;
+- untrusted Desktop frames cannot invoke privileged IPC or receive media,
+  download, navigation, popup, or protocol permissions through a trusted
+  renderer identity;
 - every Hermes-managed uv, Node, npm, and cua-driver install/update/repair path
-  resolves an exact repository-reviewed identity before execution, extraction,
-  or publication, while external package-manager installs require explicit
-  operator choice;
+  resolves an exact repository-reviewed identity rooted in a pre-established
+  trust anchor before execution, extraction, or publication, rejects replayed
+  or revoked identities, and keeps external package-manager installs behind
+  explicit operator choice;
 - regression tests exercise behavior through real boundaries rather than
   reading source text;
 - documentation states the remaining trust assumptions and operator migration.
@@ -47,15 +64,18 @@ The remediation is complete when:
 | --- | --- | --- | --- | --- |
 | 0 | Immediate operator guidance | All | P0 | None |
 | 1 | Local dashboard browser authentication | SEC-AUDIT-001 | P0 | Existing dashboard session/ticket auth |
-| 2 | LSP install and process hardening | SEC-AUDIT-002 | P0 | Existing subprocess environment builder |
+| 2 | LSP install and process hardening | SEC-AUDIT-002 | P0 | Restricted environment builder + immutable package graph |
 | 3A | Desktop metadata-fetch policy | SEC-AUDIT-003 | P1 | Electron main-process network helper |
-| 3B | Desktop remote-script isolation | SEC-AUDIT-005 | P0 | Renderer/embed boundary |
-| 4 | Verified runtime artifacts | SEC-AUDIT-004 | P1 | Release-owned artifact manifest |
+| 3B | Desktop remote-script isolation | SEC-AUDIT-005 | P0 | Inert fallback; interactive embeds require trusted-frame and permission hardening |
+| 4 | Verified runtime artifacts | SEC-AUDIT-004 | P1 program | Independent release trust root, manifest schema, and path ledger |
 | 5 | Validate hardening hypotheses | Validation items | P2 | Whole-process test harness |
-| 6 | Release evidence and operator migration | All | P0 release gate | Packages 1-5 as applicable |
+| 6A | Emergency release evidence and migration | SEC-AUDIT-001/002/005 | P0 release gate | Packages 0, 1, 2, and inert 3B |
+| 6B | Program closure evidence | All | Program gate | Packages 3A-5 and all supported-platform evidence |
 
-Packages 1, 2, and 3B are P0 and can proceed in parallel. Package 3A is
-independent. Package 4 should land as reviewable subprojects rather than one
+Packages 1, 2, and the inert 3B fix are P0 and can proceed in parallel. They
+must not wait for the multi-release supply-chain program. Package 3A is
+independent. Package 4 starts with one trust-root design and a machine-readable
+path ledger, then lands as reviewable subprojects rather than one
 repository-wide patch.
 
 ## Work package 0: Immediate operator guidance
@@ -84,8 +104,10 @@ Reduce exposure before fixed releases reach every installation.
    until every enabled optional feature has a reviewed lock.
 6. Link deployment guidance to
    [network-egress-isolation.md](network-egress-isolation.md).
-7. Prepare a private maintainer advisory before publishing exploit details in a
-   release note. Coordinate public disclosure with fixed releases.
+7. Treat the findings as publicly disclosed because the audit and plan are on
+   the public default branch. Open or update the maintainer advisory
+   immediately, record the public-disclosure time, and coordinate fixed-version
+   notes without implying that details remain private.
 
 ### Acceptance criteria
 
@@ -163,6 +185,10 @@ Do not claim provider-minted OAuth/password cookies already support loopback:
    only the bootstrap proof; it grants no direct API access. Restrict it to the
    browser-dashboard loopback mode and disable it for headless `serve`,
    non-loopback binds, and configured external auth.
+   Require an accepted `Host`, an exact trusted `Origin`, and same-origin Fetch
+   Metadata on browser requests to this endpoint. Missing, `null`, malformed,
+   or cross-origin values fail closed. Rate-limit failed attempts globally and
+   per client without consuming a valid code on a wrong guess.
 3. Add a narrow local-session middleware ahead of the legacy token check. It
    validates the dedicated cookie and attaches a normal request `Session`
    principal. Downstream route authorization remains principal-based; do not
@@ -184,6 +210,10 @@ Do not claim provider-minted OAuth/password cookies already support loopback:
    - issue/refresh the token through an authenticated exact-origin endpoint;
    - service-header and non-browser bearer callers remain on their explicit
      credential path and are not made to emulate browser CSRF state.
+   The expected origin comes from validated `dashboard.public_url` when set,
+   otherwise from the direct bound scheme/host/port. Do not derive it from
+   `Forwarded` or `X-Forwarded-*` unless the request came through an explicitly
+   trusted proxy configuration.
 8. Tighten credentialed CORS to the exact dashboard origin. `localhost:3000`
    and `localhost:9119` are different origins even though cookies consider them
    the same site.
@@ -199,6 +229,14 @@ Do not claim provider-minted OAuth/password cookies already support loopback:
 13. Audit `_PUBLIC_API_PATHS` after adding the exchange route. Public health and
    metadata endpoints must not expose secrets, session bodies, profile paths,
    or authorization material.
+14. Use a host-only cookie with no `Domain` attribute, the narrowest compatible
+   `Path`, `HttpOnly`, `SameSite=Strict`, and `Secure` whenever the canonical
+   browser origin is HTTPS. Bound session lifetime, idle lifetime, failed
+   bootstrap state, and in-memory store size, and garbage-collect expired
+   entries.
+15. Make logout a CSRF-protected unsafe request that revokes the server-side
+   session before clearing the cookie. A public `GET` must not mutate session
+   state.
 
 ### Browser implementation
 
@@ -259,6 +297,13 @@ and SPA mount:
 18. Missing, incorrect, expired, and cross-session CSRF tokens fail closed.
 19. Exact same-origin browser requests work through direct loopback and
     configured reverse-proxy base paths.
+20. Spoofed `Host`, `Origin`, `Forwarded`, and `X-Forwarded-*` values cannot
+    change the accepted origin, cookie security attributes, redirect target, or
+    profile route. Direct access to a reverse-proxy backend cannot impersonate
+    the configured public origin.
+21. A route-table behavior test proves that every registered privileged HTTP
+    and WebSocket surface is covered by a principal check; adding a new route
+    without an explicit public classification must fail closed.
 
 Run the targeted Python tests through `scripts/run_tests.sh`; do not call
 pytest directly.
@@ -302,16 +347,32 @@ lower-trust subprocesses and make automatic installations immutable.
 
 ### Configuration decision
 
-Change the default `lsp.install_strategy` from `auto` to `manual`.
+Change the effective default `lsp.install_strategy` from `auto` to `manual` and
+require affirmative, versioned consent before automatic installation.
 
-- Existing users who explicitly selected `auto` keep that opt-in.
-- Users with no explicit value stop downloading packages on first use.
-- This is a default change, not a config shape migration; do not bump
-  `_config_version` unless persisted user config must be transformed.
-- Auto-install remains supported only after the integrity and environment work
-  below lands.
+1. Add an explicit consent marker, for example
+   `lsp.auto_install_consent_version`, owned by the LSP setup/enable command.
+   `install_strategy: auto` is effective only when the marker matches the
+   current policy version.
+2. Treat every legacy `auto` value without that marker as implicit default
+   materialization, not operator consent. Migrate it to effective `manual` and
+   show the command that records a new affirmative choice.
+3. Update `DEFAULT_CONFIG` and every code-level fallback in the manager,
+   server context, CLI, and tests. No missing config path may reconstruct
+   `"auto"`.
+4. If existing persisted config must be transformed, use the normal config
+   migration and bump `_config_version`; do not rely only on deep-merge
+   behavior.
+5. Auto-install remains unavailable until the restricted environment,
+   immutable dependency graph, verified publication marker, and consent gate
+   all land. Do not ship a partially hardened automatic path.
 
-### Reuse the canonical subprocess environment
+### Purpose-specific restricted subprocess environment
+
+The existing terminal-oriented environment builder begins with inherited
+process state and removes known secrets. That is appropriate for an operator
+shell but insufficient for a lower-trust package lifecycle script or language
+server. LSP uses an allowlist constructed from an empty environment.
 
 1. Replace inherited environments in all LSP process paths:
    - npm installation;
@@ -319,16 +380,34 @@ Change the default `lsp.install_strategy` from `auto` to `manual`.
    - pip installation if retained;
    - language-server spawn;
    - helper/version probes that execute managed LSP binaries.
-2. Use `tools.environments.local.build_subprocess_env()` rather than creating a
-   second secret list.
-3. If importing that helper from `agent.lsp` creates a proven dependency cycle,
-   extract the existing builder and scrub owner into a dependency-neutral
-   module, then update every existing caller. Do not copy the function.
-4. Preserve explicit environment overrides only after they pass the canonical
-   blocklist/passthrough policy. A caller must not be able to re-add an
-   internal secret accidentally through `_env`.
-5. Preserve profile-aware `HERMES_HOME`, subprocess HOME behavior, locale,
-   PATH, and session-context isolation.
+2. Add a dependency-neutral restricted-environment builder that starts empty
+   and copies only declared execution requirements:
+   - a controlled `PATH` and platform launch variables such as `SystemRoot`,
+     `ComSpec`, and `PATHEXT` where required;
+   - locale, temporary-directory, certificate-store, and proxy values only
+     when the recipe explicitly declares them; proxy credentials or URL
+     userinfo require separate per-server operator approval;
+   - profile-aware `HERMES_HOME` and the subprocess HOME contract;
+   - recipe-owned, non-secret toolchain values.
+3. Do not inherit terminal or skill `env_passthrough`, arbitrary `*_TOKEN` or
+   `*_SECRET` variables, cloud credentials, registry credentials, CI
+   credentials, database credentials, SSH/GPG agent sockets, or package-manager
+   configuration by default.
+4. Per-server `env` overrides may add only keys declared by that server recipe
+   or approved explicitly through LSP-specific configuration. They must never
+   bypass the restricted builder or silently restore inherited values.
+5. Give package-manager processes a hermetic configuration:
+   - npm: clear `NODE_OPTIONS` and ambient `NPM_CONFIG_*`; use only the
+     committed lock, controlled cache/prefix, and declared registry policy;
+   - Go: set `GOWORK=off`, control `GOENV`, proxy, private-module, and checksum
+     policy, and use `-mod=readonly`;
+   - pip if retained: ignore user/site configuration, require hashes, and use
+     only the committed requirements graph.
+6. Keep the central secret classifications and profile-home helpers as shared
+   primitives, but do not use denylist success as proof of LSP isolation.
+7. Document that environment isolation protects process-visible credentials;
+   an LSP still has the Hermes user's filesystem and network authority unless
+   the whole process is separately isolated.
 
 ### Immutable package manifest
 
@@ -402,11 +481,13 @@ servers remain supported, require exact versions and hash-checked requirements.
 Extend `tests/agent/lsp/` with runtime behavior tests:
 
 1. Put canary variables matching provider keys, gateway tokens, dashboard
-   tokens, relay secrets, and profile/session internals into `os.environ`.
+   tokens, relay secrets, profile/session internals, arbitrary secret names,
+   AWS/cloud credentials, CI/database/registry credentials, proxy credentials,
+   and configured passthrough values into `os.environ`.
 2. Replace npm/go with a fake executable that records its received environment.
-   Assert every canary is absent.
-3. Mark one benign variable as an explicit allowed passthrough and assert that
-   it remains available.
+   Assert the complete environment equals the recipe's declared allowlist.
+3. Mark one benign variable as an LSP-recipe requirement and assert that it
+   remains available; ordinary terminal/skill passthrough must remain absent.
 4. Spawn the existing mock LSP server and have it report its environment.
    Assert canaries are absent and the correct profile home is present.
 5. Assert installer overrides cannot re-add an internal secret.
@@ -422,6 +503,11 @@ Extend `tests/agent/lsp/` with runtime behavior tests:
     and is rejected after mutation.
 13. Assert the gopls install runs with `GOWORK=off`, `-mod=readonly`, and fails
     when a transitive module version or sum differs from the committed graph.
+14. Assert legacy or materialized `auto` without the current consent marker
+    performs no install, while the explicit enable flow records consent and
+    permits only the fully verified path.
+15. Assert ambient npm, Go, and pip configuration cannot change the registry,
+    dependency graph, lifecycle policy, or executed runtime.
 
 Tests must execute functions and subprocess boundaries. Do not add tests that
 read Python source or regex installer commands.
@@ -435,16 +521,20 @@ read Python source or regex installer commands.
    - integrity state;
    - a remediation command when unavailable.
 2. Enabling auto-install should explain that Hermes will install the pinned
-   reviewed LSP bundle.
+   reviewed LSP bundle, show the environment and network trust boundary, and
+   record the current consent-policy version.
 3. Installation failures must identify version, package, and verification stage
    without logging credentials or the full environment.
 
 ### Acceptance criteria
 
-- Installer and language-server children receive no undeclared Hermes
-  credential canaries.
+- Installer and language-server children receive exactly their declared
+  environment allowlist; unrelated process credentials and passthrough values
+  are absent regardless of their names.
 - Every auto-installed package and transitive dependency is represented by a
   committed immutable lock graph.
+- Auto-install is impossible without affirmative consent for the current
+  policy version, and no legacy/materialized default counts as consent.
 - Default installs do not contact a package registry during ordinary file
   editing.
 - `manual` remains usable with operator-installed servers.
@@ -523,10 +613,21 @@ The main process, not the renderer, is authoritative:
     URLs must each receive a fresh parse, resolution, blocked-range check, and
     pinned connection.
 12. Revalidate each IPC sender against the registered set of trusted app
-    renderers before doing network work. Hermes supports primary, secondary
-    session, full instance, and HUD chat windows; authorize those explicit
-    `webContents` identities and deny hidden-title, preview, quick-entry, guest,
-    and stale/destroyed renderers unless a specific feature requires them.
+    renderers before doing network work. Authorization binds the exact live
+    `webContents`, `senderFrame`, main-frame identity, and packaged app origin;
+    matching only a `webContents` ID is insufficient. Hermes supports primary,
+    secondary session, full instance, and HUD chat windows; authorize those
+    explicit main frames and deny hidden-title, preview, quick-entry, subframe,
+    guest, and stale/destroyed senders unless a specific feature requires them.
+13. Abort in-flight requests when the authorized sender is destroyed or loses
+    its trusted main-frame identity.
+14. Define proxy behavior explicitly. A system proxy, PAC resolver, alternate
+    DNS path, or proxy-side DNS must not bypass address validation. If the
+    connection cannot be pinned and its peer address checked, fail closed
+    rather than claim SSRF protection.
+15. Classify DNS64/NAT64 and translated peer addresses at the actual connection
+    boundary. Document network topologies that require external egress policy
+    because application-level pinning cannot prove the final destination.
 
 Use Node/Electron primitives where possible. Do not add a dependency solely for
 address classification unless the built-in implementation cannot be made
@@ -577,10 +678,18 @@ Add pure main-process tests covering:
 - title/favicon requests from primary, secondary session, full instance, and
   HUD chat windows;
 - denial from hidden-title, preview, quick-entry, stale/destroyed, and guest
-  `webContents`.
+  `webContents`, plus every subframe or wrong-origin sender inside an otherwise
+  trusted `webContents`;
 - a public page declaring a private manifest URL;
 - a public manifest declaring a private icon URL;
 - private DNS, redirects, and rebinding at page, manifest, and image steps.
+- system proxy, PAC, proxy-side DNS, DNS64/NAT64, and peer-address mismatch
+  behavior.
+
+At least one boundary test must run a real local HTTP/HTTPS fixture with
+injected DNS and assert the socket peer, Host header, TLS server name, redirect
+revalidation, and abort behavior. Pure classifier tests alone do not prove the
+request implementation uses the validated address.
 
 Extend renderer tests to prove:
 
@@ -626,10 +735,13 @@ renderer that has access to `window.hermesDesktop`.
 1. Remove same-document dynamic script injection from
    `social-embed.tsx`. Do not add the provider origins to the application
    renderer's `script-src`.
-2. Prefer inert provider links, locally rendered metadata, or server-produced
-   thumbnails when an interactive embed is not essential.
-3. When an interactive social embed is retained, place it in a separately
-   sandboxed cross-origin frame or guest partition:
+2. The P0 release renders inert provider links, locally rendered metadata, or
+   server-produced thumbnails only. Do not replace the current scripts with an
+   automatically loaded remote iframe in the emergency fix; that would retain
+   privacy egress and interact with the current broad permission handler.
+3. Treat interactive embeds as a follow-up feature requiring explicit user
+   activation. Before enabling one, place it in separately owned guest
+   `webContents` and a dedicated non-persistent session:
    - no Hermes preload;
    - no `window.hermesDesktop`;
    - no Node integration;
@@ -637,29 +749,48 @@ renderer that has access to `window.hermesDesktop`.
    - minimal `sandbox` permissions;
    - no same-origin privilege unless the provider requires it and the risk is
      explicitly accepted;
-   - navigation and popup requests intercepted by the trusted parent.
+   - no media, download, geolocation, notification, clipboard, protocol, or
+     other Electron permissions;
+   - navigation, redirects, popups, downloads, and external protocol requests
+     intercepted by the trusted parent;
+   - private-network and metadata destinations blocked for all guest requests.
 4. Define a narrow `postMessage` protocol for size/readiness events if needed.
-   Validate exact sender window, origin, message type, and payload. Do not
-   proxy arbitrary native capabilities through the parent.
+   Validate exact sender frame/window, origin, message type, and payload. Do
+   not proxy arbitrary native capabilities through the parent.
 5. Enforce a Desktop Content Security Policy that keeps the privileged
    renderer's scripts self-hosted. A production CSP violation must fail visibly
    in development/CI rather than silently relaxing policy.
 6. Sweep every Desktop window type and plugin surface for remote `<script>`
    insertion. Runtime plugins are separately operator-trusted code; social
    providers and arbitrary embeds are not promoted into that trust class.
+7. Centralize privileged IPC sender validation. Every renderer-owned native
+   capability must require a registered live app `webContents`, its trusted
+   main frame, and the packaged app origin. A remote subframe sharing a trusted
+   `webContents` is not an app principal.
+8. Bind media permission grants to the same registered main-frame identity.
+   Apply the identical decision to Electron's asynchronous
+   `setPermissionRequestHandler` and synchronous `setPermissionCheckHandler`;
+   securing only one leaves a platform-dependent bypass. Keep remote guest
+   sessions deny-all. This hardening is a P0 prerequisite for any interactive
+   remote embed, even though broader media-scope validation remains in package
+   5.
 
 ### Regression tests
 
 1. Rendering Instagram, TikTok, and Twitter content appends no remote script to
    the privileged application document.
-2. The embed frame/guest has no `hermesDesktop` bridge and cannot invoke preload
-   IPC.
-3. A hostile embed `postMessage` from the wrong origin/window is ignored.
-4. Provider navigation, popup, download, permission, and protocol requests are
-   denied or handed to an explicit trusted-parent policy.
-5. CSP blocks an injected external script in primary, secondary, instance, and
+2. The P0 fallback performs no provider network request until explicit user
+   activation.
+3. Any later embed frame/guest has no `hermesDesktop` bridge and cannot invoke
+   preload IPC directly, through a subframe, or by borrowing its parent's
+   `webContents` identity.
+4. A hostile embed `postMessage` from the wrong origin/window is ignored.
+5. Provider navigation, popup, download, permission, media, private-network,
+   and protocol requests are denied or handed to an explicit trusted-parent
+   policy.
+6. CSP blocks an injected external script in primary, secondary, instance, and
    HUD chat windows.
-6. Static links and safe fallback previews still render when provider scripts
+7. Static links and safe fallback previews still render when provider scripts
    are unavailable.
 
 ### Acceptance criteria
@@ -668,6 +799,9 @@ renderer that has access to `window.hermesDesktop`.
   and explicitly trusted runtime plugins.
 - Social provider compromise cannot reach `window.hermesDesktop`, renderer
   stores, or the application DOM.
+- The emergency release makes no automatic social-provider request; an
+  interactive follow-up is blocked until frame-aware IPC and permission tests
+  pass.
 - Removing or blocking a social provider degrades to inert content rather than
   weakening the renderer boundary.
 
@@ -730,19 +864,62 @@ The sweep must explicitly resolve these compatibility paths:
 
 Apply this trust split consistently:
 
-1. Hermes-managed storage contains only manifest-verified artifacts.
+1. Hermes-managed storage contains only Hermes release-verified artifacts.
 2. An existing operator-managed executable may be used in place after version
    and capability checks, but it must not be relabelled or copied as
    Hermes-managed unless its digest matches the manifest.
 3. Installing through Winget, Homebrew, pkg, fnm, proto, or nvm requires an
    explicit operator choice. It must not run automatically because a
-   manifest-verified direct download failed.
+   release-verified direct download failed.
 4. External managers retain responsibility for their signatures and package
    integrity. Hermes reports their resolved executable and version and does not
    claim repository-level digest verification for them.
 5. Enabling the NixOS module is an explicit operator deployment choice, but
    that does not justify downloading an unpinned repository key or mutable uv
    installer during first boot.
+
+### Trust root, freshness, and rollback resistance
+
+An exact digest proves that bytes match a manifest; it does not prove that a
+fresh machine received an authentic manifest. Before implementing artifact
+consumers, define these trust classes:
+
+1. **Hermes release-verified:** the artifact identity chains to a
+   pre-established trust anchor not obtained from the same mutable endpoint as
+   the artifact, checksum, signature, or installer.
+2. **Operator-managed:** an OS package manager or version manager chosen
+   explicitly by the operator owns signature and update verification. Hermes
+   records the executable and version but does not relabel it as
+   release-verified.
+3. **Transport-trusted:** HTTPS or a release account supplied all verification
+   material without an independent anchor. This may remain a compatibility
+   flow, but it must be labelled accurately and is not sufficient for hardened
+   installation or SEC-AUDIT-004 closure.
+
+The release design must specify:
+
+- the canonical release-manifest signing identity and independently published
+  fingerprint or workflow/provenance identity;
+- how a fresh install acquires and validates that trust anchor;
+- key custody, maintainer ownership, rotation, revocation, and emergency
+  recovery;
+- a monotonic manifest sequence or release epoch, minimum accepted versions,
+  and a revocation list so an old but validly signed vulnerable manifest cannot
+  be replayed;
+- manifest expiry, supported-component EOL, security-advisory ownership, and
+  an emergency verified-update SLA for pinned runtimes;
+- the exact policy for Git commit/tag signatures and transparency-log evidence
+  where those are used.
+
+A checksum, signature, public key, and installer downloaded from one mutable
+channel do not establish authenticity. If Hermes cannot provide an independent
+anchor for a one-line bootstrap, remove the verification claim and direct
+hardened users to an OS package or a documented two-channel manual bootstrap.
+
+Create a machine-readable closure ledger before implementation. Every audited
+download or execution path records its trust owner, manifest/lock entry,
+central verifier, activation point, negative test, supported platforms, and
+migration state. CI fails when production code adds an unclassified path.
 
 ### Supply-chain manifests and locks
 
@@ -753,7 +930,10 @@ Add a small repository-owned manifest for bootstrap artifacts. It should contain
 - platform and architecture;
 - canonical HTTPS URL;
 - SHA-256 or stronger digest;
-- optional upstream signature/provenance identity;
+- required Hermes release-manifest signer identity and, when available,
+  upstream signature/provenance identity;
+- manifest sequence/release epoch, minimum accepted version, revocation state,
+  and expiry;
 - update timestamp.
 
 Use ecosystem-native committed locks for transitive package graphs:
@@ -765,14 +945,19 @@ Use ecosystem-native committed locks for transitive package graphs:
 - image digests and recorded package closures for containers.
 
 The release/update workflow owns changes to this manifest. A manifest update
-must be reviewable separately from the code that consumes it. Standalone
-install scripts that run before cloning the repository receive generated,
-embedded constants from this canonical manifest; CI proves the embedded values
-match so there is one source of truth rather than hand-maintained copies.
+must be reviewable separately from the code that consumes it. Installed Hermes
+releases consume a signed manifest whose signer and minimum sequence are rooted
+in already-trusted code. Standalone install scripts that run before cloning the
+repository may receive generated, embedded artifact constants, but those
+constants do not authenticate the installer itself. CI proves generated values
+match the canonical manifest; the fresh-install path separately proves the
+installer or manifest chains to the pre-established release trust anchor.
 
 Do not resolve `latest` during a Hermes-managed installation. A maintenance
 command may discover new releases and prepare a manifest diff, but normal
-managed installation consumes only committed values.
+managed installation consumes only committed values. Reject a correctly signed
+manifest that is expired, revoked, below the stored minimum sequence, or
+attempts to downgrade a component below its security floor.
 
 ### uv bootstrap
 
@@ -856,7 +1041,7 @@ runtime is available before uv installation.
 ### NixOS first-boot provisioning
 
 1. Replace the module's mutable uv installer with the same exact
-   manifest-verified uv artifact used by other managed paths.
+   release-verified uv artifact used by other managed paths.
 2. Prefer a Nix-pinned Node package copied or exposed through a writable runtime
    layout instead of adding NodeSource at first boot.
 3. If NodeSource apt remains necessary:
@@ -901,9 +1086,12 @@ runtime is available before uv installation.
 ### Hermes installer delivery and self-update
 
 1. Publish shell and PowerShell installers as exact release artifacts with
-   signatures and committed digests. The recommended one-line install flow must
-   retrieve a versioned script and verify it before execution; do not teach
-   `curl | sh` or `irm | iex` against a mutable endpoint.
+   signatures and committed digests. Do not describe a script as
+   release-verified when its installer, signature, digest, and key all came
+   from the same mutable channel. The hardened flow must use an OS-owned trust
+   root or a documented two-channel verification of the Hermes release key
+   before execution. Do not teach `curl | sh` or `irm | iex` against a mutable
+   endpoint.
 2. Production GUI/bootstrap-installer builds require an exact commit stamp.
    Reject branch/fallback stamps instead of silently producing an installer
    that fetches mutable branch code.
@@ -1028,13 +1216,31 @@ Add a maintainer-only update script that:
 3. verifies upstream provenance;
 4. computes the repository manifest entries;
 5. produces a deterministic diff;
-6. never writes the manifest when upstream verification fails.
+6. updates review date, EOL state, security floor, and manifest sequence;
+7. never writes the manifest when upstream verification fails.
 
 CI should verify manifest schema, unique platform mappings, canonical HTTPS
-hosts, digest format, and that code requests only manifest-listed artifacts.
-CI must not turn this into a change-detector for the newest upstream release.
+hosts, digest format, signer identity, monotonic sequence, non-expired support
+state, and that code requests only manifest-listed artifacts. CI must not turn
+this into a change-detector for the newest upstream release.
 
 ### Regression tests
+
+#### Trust root and path ledger
+
+1. A hostile distribution server controls the installer, artifact, checksum,
+   signature, provenance document, and presented public key. Installation
+   fails unless the signature chains to the pre-established Hermes trust
+   anchor.
+2. A replayed, expired, revoked, lower-sequence, or security-floor-violating
+   manifest fails before download, execution, extraction, or publication.
+3. Authorized key rotation succeeds only through the documented old-key,
+   offline recovery, or OS-package trust path; an unannounced replacement key
+   fails.
+4. Every production download/execution path appears in the machine-readable
+   closure ledger and resolves to one central verifier and negative test.
+5. A transport-trusted compatibility path is labelled as such and never writes
+   a Hermes release-verified marker.
 
 #### uv
 
@@ -1178,17 +1384,21 @@ Nix tooling, and Docker evidence through the existing image build/test path.
 - No Hermes-managed direct bootstrap, installer, repair, self-update, package
   graph, browser/Desktop payload, extension activation, MCP bootstrap, or
   published-container input uses an unreviewed mutable identity.
+- Every release-verified identity chains to the pre-established Hermes trust
+  anchor; same-channel keys, checksums, signatures, and provenance are
+  insufficient.
+- Replayed, expired, revoked, or downgrade manifests are rejected before use.
 - No cua-driver or other managed installer path executes code from a mutable
   branch or unverified network response.
 - External package/version managers run only after explicit operator selection
-  and are labelled as externally trusted rather than manifest-verified.
+  and are labelled as externally trusted rather than release-verified.
 - A modified archive is rejected before execution or extraction.
 - Verification failure preserves the previous working installation.
 - Supported platform/architecture mappings are explicit and complete.
 - Updating a pinned version requires a reviewed manifest change.
 - First-party branch-following Git updates and explicit external-manager choices
   are visibly labelled, resolve to recorded identities, and never masquerade as
-  manifest-verified artifacts.
+  release-verified artifacts.
 
 ### Rollback rule
 
@@ -1222,6 +1432,10 @@ evidence that the proposed chain did not reproduce under the tested matrix.
 
 ### Electron media permission scope
 
+This remains a validation item for existing guest surfaces, but it becomes a
+P0 prerequisite for any interactive remote social embed. The emergency
+SEC-AUDIT-005 fix must use inert content and must not wait for this experiment.
+
 1. Instrument a packaged build.
 2. Request media from:
    - every registered trusted app renderer type;
@@ -1229,9 +1443,15 @@ evidence that the proposed chain did not reproduce under the tested matrix.
    - a preview webview;
    - the hidden title partition before its removal.
 3. Log requesting `webContents`, top-level URL, frame URL, and permission.
-4. If any guest is admitted, bind grants to the explicit registered set of
-   trusted app `webContents`, app origin, and frame origin.
-5. Add denial tests for every guest surface.
+4. Bind grants to the explicit registered set of live app `webContents`, the
+   trusted main frame, app origin, and frame origin. Matching a trusted
+   `webContents` while the request came from a remote subframe is a denial.
+5. Exercise both `setPermissionRequestHandler` and
+   `setPermissionCheckHandler`. Each must independently deny an incorrect
+   `webContents`, wrong top-level or frame origin, remote subframe, destroyed
+   renderer, and guest session.
+6. Keep dedicated guest partitions deny-all for media and every other
+   privileged Electron permission.
 
 ### Profile fail-closed behavior
 
@@ -1251,20 +1471,26 @@ Keep authoring and review separable:
 1. Dashboard backend bootstrap/session exchange and Python tests.
 2. Dashboard frontend migration and browser/WebSocket tests.
 3. LSP subprocess environment hardening and canary tests.
-4. LSP immutable package manifest and default change.
-5. Desktop social-embed isolation and CSP.
-6. Desktop main-process metadata URL policy and tests.
-7. Desktop explicit title/favicon UX and removal of the hidden title fallback.
-8. Versioned Hermes installer and exact source-update fallback.
-9. uv and managed Python artifact manifest.
-10. managed Node/npm, NixOS, and transactional publication.
-11. cua-driver and other managed binary installers.
-12. browser/Chromium/Electron/native payload manifest.
-13. optional Python dependency locks.
-14. plugin/skill/profile distribution identities and MCP bootstrap lock.
-15. Docker base/package/browser closure and provenance.
-16. operator documentation and release migration notes.
-17. validation-only harnesses for MCP descriptions, media, and profiles.
+4. LSP immutable package manifest, affirmative consent, and default migration.
+5. Desktop inert social fallback, privileged-renderer CSP, and frame-aware IPC
+   guard.
+6. Desktop media/guest permission hardening before any interactive embed
+   follow-up.
+7. Desktop main-process metadata URL policy and real boundary tests.
+8. Desktop explicit title/favicon UX and removal of the hidden title fallback.
+9. Release trust root, manifest schema, revocation/anti-rollback policy, and
+   machine-readable path ledger.
+10. Versioned Hermes installer and exact source-update fallback.
+11. uv and managed Python artifact manifest.
+12. managed Node/npm, NixOS, and transactional publication.
+13. cua-driver and other managed binary installers.
+14. browser/Chromium/Electron/native payload manifest.
+15. optional Python dependency locks.
+16. plugin/skill/profile distribution identities and MCP bootstrap lock.
+17. Docker base/package/browser closure and provenance.
+18. operator documentation and release migration notes.
+19. validation-only harnesses for MCP descriptions, remaining media surfaces,
+    and profiles.
 
 Do not combine all security changes into one unreviewable patch.
 
@@ -1285,9 +1511,9 @@ Each implementation PR must include:
 | Surface | Minimum evidence |
 | --- | --- |
 | Dashboard | FastAPI middleware, SPA bootstrap, cookie/session, WebSocket ticket, prefix, headless Desktop, multi-profile |
-| LSP | Installer environment canaries, server environment canaries, offline locked install, manual mode, concurrency |
-| Desktop | No same-document remote scripts, CSP/embed isolation, renderer no-auto-fetch, title/favicon page/manifest/image matrix, redirects, DNS pinning, preload IPC, typecheck |
-| Runtime supply chain | Hermes installer/update, managed uv/Python/Node/npm/cua/binaries, browser/Electron/native payloads, optional Python locks, extensions, MCP bootstrap, NixOS and Docker inputs |
+| LSP | Complete child-environment allowlist, arbitrary secret/passthrough canaries, affirmative consent migration, offline locked install, manual mode, concurrency |
+| Desktop | Inert P0 social fallback, frame-aware IPC and permission denial, CSP, renderer no-auto-fetch, title/favicon page/manifest/image matrix, real socket peer/redirect/DNS pinning, proxy/PAC/translated-network behavior, typecheck |
+| Runtime supply chain | Independent trust-root attack, revocation/anti-rollback, path ledger, Hermes installer/update, managed uv/Python/Node/npm/cua/binaries, browser/Electron/native payloads, optional Python locks, extensions, MCP bootstrap, NixOS and Docker inputs |
 | Profiles | Default and secondary profile canaries under concurrent activity |
 
 Use the smallest targeted existing commands first. Python tests must use
@@ -1297,30 +1523,56 @@ shows shared behavior changed.
 
 ### Deployment sequence
 
-1. Publish operator mitigations.
-2. Land and release dashboard, LSP, and Desktop remote-script P0 fixes.
-3. Rotate dashboard session material on restart by design.
-4. Recommend rotation of provider and messaging credentials only when there is
+#### Emergency fixed release
+
+1. Publish the current operator mitigations and advisory state.
+2. Land dashboard browser authentication, LSP effective-manual migration plus
+   restricted environment/locked-install gate, and the inert Desktop social
+   fallback.
+3. Rebuild and release the dashboard and Desktop artifacts.
+4. Rotate dashboard session material on restart by design.
+5. Recommend provider or messaging credential rotation only when there is
    evidence that an affected shared-host or LSP-compromise scenario occurred.
-5. Land Desktop SSRF/privacy and runtime supply-chain integrity fixes.
 6. Publish fixed-version notes with exact affected modes.
-7. Monitor authentication failures, LSP install failures, blocked metadata
+
+#### Hardening program
+
+1. Land Desktop explicit metadata UX and the main-process destination policy.
+2. Establish the release trust root, anti-rollback policy, and path ledger.
+3. Migrate runtime-artifact groups in independently reviewable releases.
+4. Close validation-only items with evidence and explicit dispositions.
+5. Monitor authentication failures, LSP install failures, blocked metadata
    requests, and artifact verification failures using counts only. Do not log
    secrets, full URLs with sensitive queries, resolved internal addresses, or
    environment contents.
 
-### Final release gate
+### Emergency fixed-release gate
 
-The remediation program is complete only when:
+The P0 release may ship without completing package 4 only when:
 
-- every verified finding has a merged fix and a passing behavior regression;
-- the shipped artifacts contain the fixed source and rebuilt Desktop/frontend
+- SEC-AUDIT-001, SEC-AUDIT-002, and SEC-AUDIT-005 have merged fixes and
+  passing behavior regressions;
+- LSP auto-install is unavailable without current affirmative consent and the
+  complete restricted-environment plus locked-install path;
+- social content is inert and causes no automatic provider script/frame load;
+- shipped artifacts contain the fixed source and rebuilt Desktop/frontend
   bundles;
-- no compatibility fallback restores token disclosure, mutable package
-  resolution, unsafe redirects, hidden automatic rendering, or unverified
-  execution;
-- user-facing security and migration documentation matches runtime behavior;
-- shared-host dashboard, LSP auto-install, Desktop social/embed and
-  title/favicon behavior, and every audited managed runtime/dependency/update
-  path have been verified end to end on supported platforms;
+- no compatibility fallback restores token disclosure, inherited LSP
+  environments, mutable LSP resolution, or same-document/automatic remote
+  social content;
+- user-facing security and migration documentation matches runtime behavior.
+
+### Program closure gate
+
+The full remediation program is complete only when:
+
+- SEC-AUDIT-003 and every SEC-AUDIT-004 path in the closure ledger have merged
+  fixes and supported-platform evidence;
+- fresh-install authenticity chains to the independent trust root and
+  anti-rollback/revocation tests pass;
+- no compatibility fallback restores unsafe redirects, hidden automatic
+  rendering, unverified execution, or falsely labels transport/external-manager
+  trust as Hermes release verification;
+- shared-host dashboard, LSP, Desktop metadata/embed, and every audited managed
+  runtime/dependency/update path have been verified end to end;
 - lower-confidence items have evidence and an explicit disposition.

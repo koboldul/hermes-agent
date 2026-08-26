@@ -1,5 +1,22 @@
 import { contextBridge, ipcRenderer, webFrame, webUtils } from 'electron'
 
+// SECURITY (SEC-AUDIT-005): the privileged bridge is exposed ONLY in a window's
+// MAIN frame. A subframe — an embedded provider, an in-app browsed page, a guest
+// webContents — must never receive `window.hermesDesktop`. The main process
+// independently rejects any non-main-frame IPC sender (electron/ipc-authz), so
+// this is defense in depth, but it also keeps the bridge (and the synchronous
+// bootstrap below) out of subframes entirely.
+function isTopFrame(): boolean {
+  try {
+    return window.top === window.self
+  } catch {
+    // If cross-origin isolation makes the check throw, fail closed.
+    return false
+  }
+}
+
+const HERMES_IS_MAIN_FRAME = isTopFrame()
+
 // Which translucency the OS can back. Asked synchronously because the renderer
 // needs it before its first paint, and answered by main because deciding it
 // needs `os.release()` — a sandboxed preload may only require electron, events,
@@ -7,11 +24,11 @@ import { contextBridge, ipcRenderer, webFrame, webUtils } from 'electron'
 // and takes the ENTIRE bridge down with it (window.hermesDesktop undefined =>
 // "Desktop IPC bridge is unavailable"). No reply means no glass, which degrades
 // to an ordinary opaque window rather than a page thinned over nothing.
-const translucencySupport = ipcRenderer.sendSync('hermes:translucency:support')
-const hudWindowing = ipcRenderer.sendSync('hermes:hud:windowing')
+const translucencySupport = HERMES_IS_MAIN_FRAME ? ipcRenderer.sendSync('hermes:translucency:support') : null
+const hudWindowing = HERMES_IS_MAIN_FRAME ? ipcRenderer.sendSync('hermes:hud:windowing') : null
 const hudNativeDrag = hudWindowing?.nativeDrag === true
 
-contextBridge.exposeInMainWorld('hermesDesktop', {
+const hermesDesktopBridge = {
   glassSupported: translucencySupport?.glass === true,
   translucencySupported: translucencySupport?.translucency === true,
   getConnection: profile => ipcRenderer.invoke('hermes:connection', profile),
@@ -503,4 +520,9 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
 
     return () => ipcRenderer.removeListener('hermes:open-find-bar', listener)
   }
-})
+}
+
+// Expose the privileged bridge ONLY in the main frame (see HERMES_IS_MAIN_FRAME).
+if (HERMES_IS_MAIN_FRAME) {
+  contextBridge.exposeInMainWorld('hermesDesktop', hermesDesktopBridge)
+}

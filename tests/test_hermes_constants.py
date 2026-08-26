@@ -155,6 +155,31 @@ class TestGetProcessHermesHome:
 
 
 
+def _mark_managed_node_tree(node_dir, *, create_anchor=True):
+    """Write a valid A6/A1 WHOLE-TREE provenance marker for a managed node tree
+    so it is trusted for execution (mirrors what a real heal/bootstrap writes).
+
+    Returns the marked node anchor (or None when there is none to anchor).
+    """
+    from hermes_cli.supply_chain.managed import write_tool_marker
+
+    anchor = None
+    for name in ("node.exe", "node"):
+        candidate = node_dir / name
+        if candidate.is_file():
+            anchor = candidate
+            break
+    if anchor is None and create_anchor:
+        anchor = node_dir / ("node.exe" if os.name == "nt" else "node")
+        anchor.write_text("fake-node", encoding="utf-8")
+        if os.name != "nt":
+            anchor.chmod(0o755)
+    if anchor is not None:
+        tree_root = hermes_constants._managed_node_tree_root(anchor)
+        write_tool_marker(anchor, tree_dir=tree_root, component="node", version="", provenance="test")
+    return anchor
+
+
 class TestHermesManagedNode:
     @pytest.mark.windows_only
     def test_windows_node_dir_prefers_portable_root(self, tmp_path, monkeypatch):
@@ -174,8 +199,13 @@ class TestHermesManagedNode:
         node_dir.mkdir(parents=True)
         npm_cmd = node_dir / "npm.cmd"
         npm_cmd.write_text("@echo off\n")
+        # A6: a managed tree is used only when marked. Mark node.exe (the tree
+        # anchor) so npm.cmd resolves; without the marker the tree is ignored.
+        (node_dir / "node.exe").write_text("fake-node", encoding="utf-8")
+        _mark_managed_node_tree(node_dir)
         monkeypatch.setenv("HERMES_HOME", str(home))
         monkeypatch.setattr(hermes_constants, "node_tool_runnable", lambda path: True)
+        monkeypatch.setattr(hermes_constants, "_managed_node_tree_outdated", lambda *a, **k: False)
 
         assert find_hermes_node_executable("npm") == str(npm_cmd)
 
@@ -187,6 +217,10 @@ class TestHermesManagedNode:
         managed_npm = home / "node" / "npm.cmd"
         managed_npm.parent.mkdir(parents=True)
         managed_npm.write_text("@echo off\n")
+        # A6: a TRUSTED (marked) managed tree that is broken fails closed — it
+        # must not silently fall back to a system npm on PATH.
+        (home / "node" / "node.exe").write_text("fake-node", encoding="utf-8")
+        _mark_managed_node_tree(home / "node")
         bin_dir = tmp_path / "nodejs"
         bin_dir.mkdir()
         path_npm = bin_dir / "npm.cmd"
@@ -239,6 +273,10 @@ class TestNodeToolRunnable:
         monkeypatch.setenv("HERMES_HOME", str(profile_home))
         monkeypatch.setenv("PATH", str(system_bin))
         monkeypatch.setattr(hermes_constants, "_managed_node_heal_attempted", False)
+        # A6: mark the managed tree (node anchor) so it is trusted. The heal
+        # only repairs npm; the node anchor is unchanged, so its marker stays
+        # valid across the heal.
+        _mark_managed_node_tree(managed_bin)
 
         def _heal():
             heal_called["value"] = True
@@ -259,6 +297,10 @@ class TestNodeToolRunnable:
         managed_bin = profile_home / "node" / "bin"
         managed_bin.mkdir(parents=True)
         self._stub(managed_bin, "npm", "#!/bin/sh\nexit 1\n")
+        # A6: a TRUSTED but broken managed tree fails closed rather than using
+        # system npm. Add + mark a node anchor so the tree is trusted.
+        self._stub(managed_bin, "node", "#!/bin/sh\nexit 1\n")
+        _mark_managed_node_tree(managed_bin)
 
         system_bin = tmp_path / "system-bin"
         system_bin.mkdir()
@@ -285,11 +327,15 @@ class TestNodeToolRunnable:
         monkeypatch.setenv("HERMES_HOME", str(profile_home))
         monkeypatch.setenv("PATH", "")
         monkeypatch.setattr(hermes_constants, "_managed_node_heal_attempted", False)
+        _mark_managed_node_tree(managed_bin)
 
         def _heal():
             heal_called["value"] = True
             old_node.write_text(f"#!/bin/sh\necho 'v{target}.5.1'\nexit 0\n")
             old_node.chmod(0o755)
+            # A real heal rewrites the tree AND its provenance marker; mirror
+            # that so the healed (changed) node is trusted again.
+            _mark_managed_node_tree(managed_bin)
             return True
 
         monkeypatch.setattr(hermes_constants, "heal_hermes_managed_node", _heal)
@@ -312,6 +358,7 @@ class TestNodeToolRunnable:
         monkeypatch.setenv("PATH", "")
         monkeypatch.setattr(hermes_constants, "_managed_node_heal_attempted", False)
         monkeypatch.setattr(hermes_constants, "heal_hermes_managed_node", lambda: False)
+        _mark_managed_node_tree(managed_bin)
 
         assert hermes_constants.find_hermes_node_executable("node") == str(old_node)
 
@@ -328,6 +375,7 @@ class TestNodeToolRunnable:
         monkeypatch.setenv("HERMES_HOME", str(profile_home))
         monkeypatch.setenv("PATH", "")
         monkeypatch.setattr(hermes_constants, "_managed_node_heal_attempted", False)
+        _mark_managed_node_tree(managed_bin)
 
         def _heal():
             raise AssertionError("heal must not run for an up-to-date tree")
@@ -852,6 +900,15 @@ class TestWindowsHealStageSwap:
         monkeypatch.setattr(hermes_constants.sys, "platform", "win32")
         monkeypatch.setenv("PROCESSOR_ARCHITECTURE", "AMD64")
         monkeypatch.setenv("HERMES_HOME", str(home))
+        # These tests exercise the download/stage/swap MECHANICS, which are now
+        # the transport-trusted compatibility path: opt in via the config gate so
+        # the mutable nodejs.org download is permitted (secure default disables it).
+        monkeypatch.setattr(
+            "hermes_cli.supply_chain.gate._sc_config", lambda: {"enforce": True, "allow_unverified_components": ["*"]}
+        )
+        monkeypatch.setattr(
+            hermes_constants, "_managed_node_fail_closed_notice_printed", False
+        )
         monkeypatch.setenv(
             "HERMES_NODE_TARGET_MAJOR",
             str(hermes_constants._HERMES_NODE_TARGET_MAJOR),

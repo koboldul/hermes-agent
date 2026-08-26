@@ -527,6 +527,19 @@ def _allow_lazy_installs() -> bool:
         if not bool(sec.get("allow_lazy_installs", True)):
             return False
 
+    # (1.5) Supply-chain enforce (WP4): lazy installs pull unpinned, unhashed
+    # packages from PyPI. No lazy feature ships a committed hash-locked graph
+    # yet, so automatic lazy installation is disabled by default. An explicit
+    # operator opt-in (security.supply_chain.allow_unverified_components:
+    # ["lazy-deps"]) restores it.
+    try:
+        from hermes_cli.supply_chain.gate import compat_opt_in
+
+        if not compat_opt_in("lazy-deps"):
+            return False
+    except Exception:
+        return False
+
     # (2) Sealed-venv env var: blocks ONLY when there is no safe durable
     # target to redirect into. With a target set, the install goes to the
     # data volume (append-only on sys.path), so the seal is preserved.
@@ -750,10 +763,17 @@ def _venv_pip_install(specs: tuple[str, ...], *, timeout: int = 300) -> _Install
         # action than the caller asked for. Tier 2 pip covers the no-uv case.
         try:
             from hermes_cli.managed_uv import resolve_uv
+            from hermes_cli.supply_chain.managed import accept_operator_path
 
-            uv_bin = resolve_uv() or shutil.which("uv")
+            # A6/alias: resolve_uv() returns only a marker-verified managed uv;
+            # the shutil.which fallback must be classifier-gated too, or a
+            # managed uv reached via a PATH/symlink/case alias (incl. another
+            # profile's) would execute unverified.
+            uv_bin = resolve_uv() or accept_operator_path(shutil.which("uv"), component="uv")
         except Exception:
-            uv_bin = shutil.which("uv")
+            from hermes_cli.supply_chain.managed import accept_operator_path
+
+            uv_bin = accept_operator_path(shutil.which("uv"), component="uv")
         if uv_bin:
             try:
                 r = subprocess.run(

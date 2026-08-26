@@ -17,6 +17,16 @@ If you prefer a real POSIX environment (for the dashboard's embedded terminal, `
 
 ## Quick install
 
+:::warning Install `uv` first
+The installer builds Hermes' Python environment with [`uv`](https://docs.astral.sh/uv/) but, for supply-chain safety, **will not auto-download it**. Install `uv` before running the one-liner, then verify with `uv --version`:
+
+```powershell
+winget install astral-sh.uv
+```
+
+If `uv`, Node.js, or Git are missing, the installer stops with the exact command to install them instead of fetching unverified binaries. The `-AllowUnverifiedBootstrap` switch opts into those unverified installers and is not recommended.
+:::
+
 Open **PowerShell** (or Windows Terminal) and run:
 
 ```powershell
@@ -45,7 +55,7 @@ The installer auto-retries flaky git fetches and strips BOM from any downloaded 
 
 ### Desktop installer (alternative)
 
-A thin GUI installer is also available — useful if you'd rather double-click an `.exe` than open PowerShell. Download Hermes Desktop, run the installer, and on first launch the GUI calls `install.ps1` under the hood to provision Python (via `uv`), Node, PortableGit, and the rest of the dependency bootstrap described below. After the first run, the desktop app and the PowerShell-installed `hermes` CLI share the same `%LOCALAPPDATA%\hermes\hermes-agent` install and `%LOCALAPPDATA%\hermes` data directory — switch between the GUI and the CLI freely.
+A thin GUI installer is also available — useful if you'd rather double-click an `.exe` than open PowerShell. **Install `uv` first** (`winget install astral-sh.uv`) — like the PowerShell one-liner, the GUI uses an operator-installed `uv` and will not auto-provision it. Download Hermes Desktop, run the installer, and on first launch the GUI calls `install.ps1` under the hood to build the Python environment (via your installed `uv`) and bootstrap Node, PortableGit, and the rest of the dependencies described below; if `uv` (or Node/Git) is missing it surfaces the exact install command rather than silently fetching unverified binaries. After the first run, the desktop app and the PowerShell-installed `hermes` CLI share the same `%LOCALAPPDATA%\hermes\hermes-agent` install and `%LOCALAPPDATA%\hermes` data directory — switch between the GUI and the CLI freely.
 
 Use the desktop installer when you want a familiar Windows install experience or you're handing Hermes to a non-developer; use the PowerShell one-liner when you're already in a terminal.
 

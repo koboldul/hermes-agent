@@ -20,75 +20,21 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agent.lsp.install import INSTALL_RECIPES
-
 
 # ---------------------------------------------------------------------------
 # Fix 1: typescript install recipe carries the typescript SDK
 # ---------------------------------------------------------------------------
-
-
-
-
-
-
-def test_install_npm_works_without_extras(tmp_path, monkeypatch):
-    """Backwards compat: pyright-style recipes (no extras) still install."""
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-
-    captured = {}
-
-    def fake_run(cmd, **kwargs):
-        captured["cmd"] = cmd
-        return MagicMock(returncode=0, stderr="")
-
-    from agent.lsp import install as install_mod
-
-    monkeypatch.setattr(install_mod.subprocess, "run", fake_run)
-    monkeypatch.setattr(install_mod.shutil, "which", lambda c: "/usr/bin/npm" if c == "npm" else None)
-
-    install_mod._install_npm("pyright", "pyright-langserver")
-
-    cmd = captured["cmd"]
-    assert "pyright" in cmd
-    # Should not blow up when extra_pkgs is omitted/None
-    install_targets = [c for c in cmd if not c.startswith("-") and c not in {
-        "install", "--prefix", str(install_mod.hermes_lsp_bin_dir().parent),
-        "/usr/bin/npm",
-    }]
-    assert install_targets == ["pyright"]
-
-
+#
+# The npm/pip install-mechanism tests that used to live here were removed in
+# the SEC-AUDIT-002 rewrite (agent/lsp/install.py no longer exposes the mutable
+# ``_install_npm`` / ``_install_pip`` helpers).  Immutable-install behavior is
+# covered by tests/agent/lsp/test_install_hardening.py.
 
 
 @pytest.mark.windows_only
-def test_install_pip_finds_windows_scripts_launcher(tmp_path, monkeypatch):
-    """pip console scripts can land in Scripts/ on native Windows.
-
-    ``windows_only``: the ``Scripts/`` layout and the ``.exe`` launcher are
-    what pip actually produces on Windows. Faking ``_is_windows()`` on Linux
-    made the test assert against a directory tree the test itself created, on
-    a host where pip would never lay it out that way.
-    """
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-
-    from agent.lsp import install as install_mod
-
-    def fake_run(cmd, **kwargs):
-        scripts_dir = install_mod.hermes_lsp_bin_dir().parent / "python-packages" / "Scripts"
-        scripts_dir.mkdir(parents=True, exist_ok=True)
-        launcher = scripts_dir / "fake-language-server.exe"
-        launcher.write_text("launcher\n")
-        launcher.chmod(0o755)
-        return MagicMock(returncode=0, stderr="")
-
-    monkeypatch.setattr(install_mod.subprocess, "run", fake_run)
-
-    resolved = install_mod._install_pip("fake-lsp", "fake-language-server")
-
-    assert resolved is not None
-    assert resolved.endswith("fake-language-server.exe")
-    assert (install_mod.hermes_lsp_bin_dir() / "fake-language-server.exe").exists()
+def test_windows_placeholder_removed():
+    """Placeholder kept intentionally empty; see test_install_hardening.py."""
+    pass
 
 
 # ---------------------------------------------------------------------------

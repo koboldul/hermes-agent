@@ -4,12 +4,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GatewayClient } from "./gatewayClient";
 
 const reloadMocks = vi.hoisted(() => ({
-  maybeReloadForLoopbackWsAuthFailure: vi.fn(() => false),
+  maybeReturnToBootstrapGateOnWsAuthFailure: vi.fn(() => false),
 }));
 
 vi.mock("./dashboard-auth-reload", () => ({
-  maybeReloadForLoopbackWsAuthFailure:
-    reloadMocks.maybeReloadForLoopbackWsAuthFailure,
+  maybeReturnToBootstrapGateOnWsAuthFailure:
+    reloadMocks.maybeReturnToBootstrapGateOnWsAuthFailure,
 }));
 
 class FakeWebSocket {
@@ -56,7 +56,7 @@ type EventLike = {
 
 beforeEach(() => {
   FakeWebSocket.instances = [];
-  reloadMocks.maybeReloadForLoopbackWsAuthFailure.mockClear();
+  reloadMocks.maybeReturnToBootstrapGateOnWsAuthFailure.mockClear();
   vi.stubGlobal("WebSocket", FakeWebSocket);
   Object.defineProperty(window, "__HERMES_SESSION_TOKEN__", {
     configurable: true,
@@ -75,8 +75,8 @@ afterEach(() => {
 });
 
 describe("GatewayClient", () => {
-  it("treats loopback 4401 closes as stale-token reload candidates", async () => {
-    reloadMocks.maybeReloadForLoopbackWsAuthFailure.mockReturnValue(true);
+  it("routes 4401 closes to the bootstrap-gate recovery path", async () => {
+    reloadMocks.maybeReturnToBootstrapGateOnWsAuthFailure.mockReturnValue(true);
     const gw = new GatewayClient();
     const connectPromise = gw.connect();
 
@@ -89,7 +89,7 @@ describe("GatewayClient", () => {
     socket.emit("close", { code: 4401 });
 
     expect(
-      reloadMocks.maybeReloadForLoopbackWsAuthFailure,
+      reloadMocks.maybeReturnToBootstrapGateOnWsAuthFailure,
     ).toHaveBeenCalledWith(4401);
     expect(gw.connectionState).toBe("open");
   });

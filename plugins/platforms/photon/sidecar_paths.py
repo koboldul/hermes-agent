@@ -139,3 +139,69 @@ def resolve_sidecar_dir(source_dir: Optional[Path] = None) -> Path:
             exc,
         )
         return source
+
+
+# The sidecar's ONE reviewed, first-party lifecycle script. It ships in-repo
+# (mirrored above) and patches spectrum-ts's mixed-attachment handling after
+# install. See plugins/platforms/photon/sidecar/package.json `postinstall`.
+SIDECAR_PATCH_FILE = "patch-spectrum-mixed-attachments.mjs"
+
+
+def run_sidecar_patch(
+    sidecar_dir: Path,
+    *,
+    timeout: Optional[float] = None,
+    hide_windows_console: bool = False,
+) -> tuple[bool, str]:
+    """Run the sidecar's audited first-party spectrum-ts patch (A4).
+
+    The sidecar is installed with ``npm ci --ignore-scripts`` so NO dependency
+    runs arbitrary install-time code (npm's ``allowScripts`` allowlist is not
+    honored by every supported npm major). Its single reviewed, first-party
+    ``postinstall`` — the spectrum-ts mixed-attachments patch that ships in this
+    repo — is then run explicitly here. This is the sidecar equivalent of the
+    root workspace's ``run-allowed-lifecycle.mjs`` orchestrator: only the
+    reviewed script runs, never a third-party dependency's install hook.
+
+    Returns ``(ok, detail)``. Missing ``node`` or a missing patch file is a
+    no-op success so a non-Node environment never hard-fails here.
+    """
+    import subprocess
+
+    patch = Path(sidecar_dir) / SIDECAR_PATCH_FILE
+    if not patch.exists():
+        return True, "no sidecar patch present"
+    node = shutil.which("node")
+    if not node:
+        logger.warning(
+            "[photon] cannot run the sidecar spectrum-ts patch: node not on PATH"
+        )
+        return False, "node not found"
+    kwargs: dict = {}
+    if hide_windows_console:
+        try:
+            from hermes_cli._subprocess_compat import windows_hide_flags
+
+            kwargs["creationflags"] = windows_hide_flags()
+        except Exception:
+            pass
+    try:
+        result = subprocess.run(  # noqa: S603
+            [node, SIDECAR_PATCH_FILE],
+            cwd=str(sidecar_dir),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=timeout,
+            **kwargs,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.error("[photon] sidecar spectrum-ts patch failed to run: %s", exc)
+        return False, str(exc)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        logger.error("[photon] sidecar spectrum-ts patch failed: %s", detail)
+        return False, detail
+    return True, "patched"

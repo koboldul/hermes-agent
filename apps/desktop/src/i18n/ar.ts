@@ -478,6 +478,9 @@ export const ar = defineLocale({
       embedsAlways: 'دائما',
       embedsOff: 'إيقاف',
       embedsReset: count => `إعادة تعيين ${count} ${count === 1 ? 'خدمة مسموح بها' : 'خدمة مسموح بها'}`,
+      linkPreviewsTitle: 'معاينات الروابط',
+      linkPreviewsDesc:
+        'جلب عناوين الصفحات وأيقونات المواقع للروابط. مُعطَّل افتراضيًا: لا يُجري هيرميس أي طلب حتى تُفعِّله، ويتحقق التطبيق من كل وجهة ويثبّتها.',
       product: 'مبسط',
       productDesc: 'عرض أنظف يركز على النتيجة.',
       technical: 'تقني',

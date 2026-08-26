@@ -58,9 +58,24 @@ export function fromCI(env = process.env) {
   return {
     commit: sha,
     branch: branch,
-    dirty: false, // CI builds from a checkout-of-ref by definition
+    // A5: NEVER assume a CI checkout is clean just because GITHUB_SHA is set —
+    // the tree can be modified after checkout and before packaging. `dirty` is
+    // left UNKNOWN here and resolved by a REAL git clean check in resolveStamp.
+    dirty: null,
     source: "ci"
   }
+}
+
+/**
+ * A5: run a REAL git clean check. Returns true (dirty), false (clean), or null
+ * when git is unavailable. With ``untracked: true`` untracked files also count
+ * as dirty (``--untracked-files=all``); default ``-uno`` is tracked-only.
+ */
+export function isWorkingTreeDirty(repoRoot = REPO_ROOT, execFn = tryExec, { untracked = false } = {}) {
+  const flag = untracked ? "--untracked-files=all" : "-uno"
+  const status = execFn(`git status --porcelain ${flag}`, { cwd: repoRoot })
+  if (status === null) return null // git unavailable
+  return status.length > 0
 }
 
 export function fromLocalGit(repoRoot = REPO_ROOT, execFn = tryExec) {
@@ -107,11 +122,50 @@ export function resolveStamp({
   execFn = tryExec,
   fallbackBranch = FALLBACK_BRANCH
 } = {}) {
-  return fromCI(env) || fromLocalGit(repoRoot, execFn) || fromFallback(fallbackBranch)
+  const base = fromCI(env) || fromLocalGit(repoRoot, execFn) || fromFallback(fallbackBranch)
+  if (base.source === "fallback") {
+    return base
+  }
+  // A5: the AUTHORITATIVE clean signal is a real git check — GITHUB_SHA never
+  // implies a clean tree. git unavailable (null) is treated as DIRTY so a
+  // production build fails closed rather than stamping a false "clean".
+  const dirty = isWorkingTreeDirty(repoRoot, execFn)
+  base.dirty = dirty === null ? true : dirty
+  return base
 }
 
 export function isFallbackCommit(commit) {
   return typeof commit === "string" && /^0{7,40}$/.test(commit)
+}
+
+/**
+ * A10 — a production/publish build must ship an ATTESTED identity: a real, full
+ * 40-char commit from a clean tree. The publish workflow sets
+ * HERMES_DESKTOP_REQUIRE_ATTESTED_STAMP=1 to enforce this.
+ */
+export function requireAttestedStamp(env = process.env) {
+  return env.HERMES_DESKTOP_REQUIRE_ATTESTED_STAMP === "1"
+}
+
+/**
+ * Reason a stamp is NOT acceptable for a production build, or null when it is.
+ * Rejects missing, all-zero/placeholder (unpinned branch), non-full-SHA, and
+ * dirty stamps — the exact classes A10 requires production builds to refuse.
+ */
+export function stampRejectionReason(stamp) {
+  if (!stamp || !stamp.commit) {
+    return "no commit could be resolved"
+  }
+  if (isFallbackCommit(stamp.commit)) {
+    return "placeholder/all-zero commit — this is an unpinned branch build (branch-only stamp)"
+  }
+  if (!/^[0-9a-f]{40}$/i.test(stamp.commit)) {
+    return "commit is not a full 40-character git SHA"
+  }
+  if (stamp.dirty) {
+    return "working tree is dirty — the packaged code differs from the pinned commit"
+  }
+  return null
 }
 
 function main() {
@@ -147,6 +201,25 @@ function main() {
         " but the packaged code may differ from that commit.\n" +
         "  Commit your changes before publishing this build."
     )
+  }
+
+  // A10 production gate: a publish/production build must not ship a
+  // missing/all-zero/branch-only/dirty stamp. The warnings above are advisory
+  // for local/dev builds; when attestation is required we FAIL CLOSED instead.
+  if (requireAttestedStamp()) {
+    const reason = stampRejectionReason(stamp)
+    if (reason) {
+      console.error(
+        "[write-build-stamp] ERROR: production build requires an attested install stamp.\n" +
+          "  Rejected: " +
+          reason +
+          ".\n" +
+          "  A production Desktop build must pin an exact, full commit SHA from a clean\n" +
+          "  tree so first-launch bootstrap has an attested installer identity — no\n" +
+          "  branch-raw-script or unpinned-branch fallback is permitted."
+      )
+      process.exit(1)
+    }
   }
 
   const payload = {

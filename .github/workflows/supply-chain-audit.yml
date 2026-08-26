@@ -255,6 +255,30 @@ jobs:
           echo "::error::PyPI dependencies without upper bounds detected. Add <next_major ceiling per CONTRIBUTING.md policy."
           exit 1
 
+  manifest-ledger:
+    name: Validate supply-chain manifest and ledger
+    if: inputs.scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      # check_supply_chain.py parses every workflow / composite-action YAML with
+      # PyYAML for the ungated-npm audit and FAILS CLOSED when PyYAML is missing
+      # or a file is unparseable, so the exact version is now a hard CI
+      # prerequisite (the checker is no longer stdlib-only for this audit).
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Install pinned PyYAML (workflow npm audit prerequisite)
+        run: python -m pip install pyyaml==6.0.3
+
+      - name: Check manifest, ledger, and mutable-fetch surface
+        run: python scripts/ci/check_supply_chain.py
+
   aggregate:
     name: Aggregate review statuses
     needs: [scan, dep-bounds]

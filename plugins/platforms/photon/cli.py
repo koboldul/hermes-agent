@@ -458,12 +458,15 @@ def _install_sidecar() -> int:
     # `npm ci` installs the committed lockfile verbatim; fall back to
     # `npm install` when the lockfile is missing or drifted (e.g. a dev
     # checkout mid-upgrade).
-    print(f"  $ cd {_sidecar_dir()} && {npm} ci")
+    print(f"  $ cd {_sidecar_dir()} && {npm} ci --ignore-scripts")
     # stdout is not captured so npm progress prints to the terminal in real
     # time. stderr is captured so we can persist the failure reason for
     # check_requirements() to surface after the process exits.
+    # A4 audited lifecycle: install with --ignore-scripts (no dependency runs
+    # arbitrary install-time code), then run the sidecar's ONE reviewed
+    # first-party postinstall (the spectrum-ts patch) explicitly below.
     proc = subprocess.run(  # noqa: S603
-        [npm, "ci"],
+        [npm, "ci", "--ignore-scripts"],
         cwd=str(_sidecar_dir()),
         check=False,
         stderr=subprocess.PIPE,
@@ -472,9 +475,9 @@ def _install_sidecar() -> int:
     if proc.stderr:
         print(proc.stderr, end="", file=sys.stderr)
     if proc.returncode != 0:
-        print(f"  npm ci failed — falling back to:  {npm} install")
+        print(f"  npm ci failed — falling back to:  {npm} install --ignore-scripts")
         proc = subprocess.run(  # noqa: S603
-            [npm, "install"],
+            [npm, "install", "--ignore-scripts"],
             cwd=str(_sidecar_dir()),
             check=False,
             stderr=subprocess.PIPE,
@@ -493,6 +496,13 @@ def _install_sidecar() -> int:
             except OSError:
                 pass
     else:
+        # A4: run ONLY the reviewed first-party lifecycle script (the install
+        # above ran with --ignore-scripts, so no dependency hook executed).
+        from .sidecar_paths import run_sidecar_patch
+
+        ok, detail = run_sidecar_patch(_sidecar_dir())
+        if not ok:
+            print(f"  sidecar spectrum-ts patch failed: {detail}", file=sys.stderr)
         try:
             _npm_error_log().unlink()
         except OSError:

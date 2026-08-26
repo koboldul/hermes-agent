@@ -7,6 +7,13 @@ This document records a source review of Hermes Agent at commit
 point-in-time engineering assessment, not a claim that the repository is free
 of other vulnerabilities.
 
+The audit and remediation plan were published on the public default branch on
+2026-08-25. Disclosure is therefore in progress. The remediation plan was
+corrected after security-architecture review to require an allowlisted LSP
+environment, affirmative auto-install consent, an independently anchored
+release trust root with anti-rollback, and inert Desktop social content until
+frame-aware IPC and permission controls are proven.
+
 The review used the trust model in [SECURITY.md](../../SECURITY.md). In
 particular:
 
@@ -276,10 +283,12 @@ managed LSP installation and execute again when the server starts.
 
 #### Required security property
 
-Every LSP installer and language-server child must receive the canonical
-sanitized subprocess environment. Automatic installations must resolve to a
-repository-reviewed, immutable dependency graph, or require explicit operator
-approval.
+Every LSP installer and language-server child must receive a purpose-specific
+environment constructed from a declared allowlist. Removing known secrets from
+an inherited environment is insufficient because unrelated credentials and
+passthrough values remain process-visible. Automatic installations must require
+affirmative consent for the current policy version and resolve to a
+repository-reviewed, immutable dependency graph.
 
 ---
 
@@ -436,8 +445,10 @@ application's own renderer APIs.
 #### Required security property
 
 No remotely hosted script may execute in a renderer document that owns Hermes
-preload capabilities. Social content must use a separate sandboxed origin/frame
-without the bridge, or degrade to an inert link/preview.
+preload capabilities. The fixed release must degrade to an inert link/preview.
+Any later interactive embed must use separately owned guest content without the
+bridge, must not inherit trusted-main-frame IPC identity, and must receive no
+media or other privileged Electron permissions.
 
 ---
 
@@ -578,8 +589,11 @@ process, Desktop renderer, or published container.
 Every Hermes-managed direct installer, bootstrap, repair, self-update, package
 graph, browser/Desktop payload, extension distribution, MCP bootstrap, and
 published container input identified above must resolve through an immutable
-identity reviewed before execution or publication. Verification must happen
-before execution, extraction, import, or activation.
+identity reviewed before execution or publication. That identity must chain to
+a pre-established trust anchor not supplied by the same mutable channel as the
+artifact and verification metadata. Verification must happen before execution,
+extraction, import, or activation, and valid but expired, revoked, or replayed
+downgrade manifests must be rejected.
 
 First-party branch-following Git updates and explicit external
 package/version-manager choices may remain separate documented trust
@@ -721,15 +735,18 @@ Until code remediation lands:
 2. Do not use the browser dashboard on a shared host unless an external
    authenticated reverse proxy and host firewall isolate it.
 3. Set `lsp.install_strategy: manual` and install reviewed language servers
-   through the OS or project package manager.
+   through the OS or project package manager. Treat any existing `auto` value as
+   unsafe until a fixed release requires affirmative consent and uses the
+   restricted environment plus immutable package graph.
 4. Avoid rendering untrusted bare links in Desktop, or use Desktop in a
    network-restricted environment when processing untrusted messages.
 5. Avoid interactive social embeds in Desktop until remote scripts are isolated
    from the privileged renderer.
 6. Set `security.allow_lazy_installs: false` in hardened deployments and
    preinstall reviewed optional dependencies.
-7. Preinstall uv and Node from signed or checksum-verified package-manager
-   sources.
+7. Prefer uv and Node from an operator-selected OS/version manager with its own
+   signature policy. A checksum or key downloaded from the same mutable channel
+   as an installer is not independent verification.
 8. Use whole-process isolation and restricted egress for untrusted web, email,
    messaging, repository, and MCP content. See
    [network-egress-isolation.md](network-egress-isolation.md).

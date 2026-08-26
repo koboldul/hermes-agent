@@ -590,8 +590,16 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
                     # Read timeout from environment variable, default to 300 seconds (5 minutes)
                     # to accommodate slower systems like Unraid NAS
                     npm_install_timeout = env_int("WHATSAPP_NPM_INSTALL_TIMEOUT", 300)
+                    # A4 audited lifecycle: install WITHOUT running lifecycle
+                    # scripts. The bridge (scripts/whatsapp-bridge) is a
+                    # first-party package with a committed lockfile, no
+                    # first-party install script, and only pure-JS runtime deps
+                    # (baileys/express/pino/qrcode-terminal), so nothing needs a
+                    # post-install rebuild -- --ignore-scripts is the complete,
+                    # version-independent guarantee that no dependency runs
+                    # arbitrary install-time code.
                     install_result = subprocess.run(
-                        [_npm_bin, "install", "--silent"],
+                        [_npm_bin, "install", "--silent", "--ignore-scripts"],
                         cwd=str(bridge_dir),
                         capture_output=True,
                         text=True, encoding='utf-8', errors='replace',

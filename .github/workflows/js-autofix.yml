@@ -72,7 +72,7 @@ jobs:
 
       - name: grab npm 12
         run: |
-          npm i -g npm@12
+          node scripts/ci/install-npm-pinned.mjs
 
       # --ignore-scripts: eslint only needs TS sources + eslint packages.
       - uses: ./.github/actions/retry

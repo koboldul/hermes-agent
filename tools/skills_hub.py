@@ -179,6 +179,67 @@ def _referenced_support_paths(skill_md: str) -> Optional[set[str]]:
     return paths
 
 
+def _whole_bundle_digest(bundle: SkillBundle) -> str:
+    """Deterministic sha256 over the whole skill bundle (path + content).
+
+    Order-independent: entries are sorted by path so the digest is stable for a
+    given set of files regardless of dict iteration order.
+    """
+    import hashlib
+
+    digest = hashlib.sha256()
+    for rel_path in sorted(bundle.files):
+        content = bundle.files[rel_path]
+        if isinstance(content, str):
+            content = content.encode("utf-8")
+        digest.update(rel_path.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(hashlib.sha256(content).digest())
+    return digest.hexdigest()
+
+
+_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+
+# ONLY the transport layer — a fetcher resolving a ref via git or the GitHub
+# API — may write these keys. Content-declared metadata (SKILL.md frontmatter,
+# catalog JSON, a mutable live-main response) is attacker-controlled and must
+# NEVER populate them: self-declared identity is not identity.
+_TRANSPORT_COMMIT_KEY = "resolved_commit"
+_FIRST_PARTY_LOCAL_KEY = "first_party_local"
+
+
+def bundle_exact_identity(bundle: SkillBundle) -> Optional[str]:
+    """Return the TRANSPORT-RESOLVED 40-char commit for *bundle*, or ``None``.
+
+    Security contract (WP4): an exact identity must be resolved by the transport
+    (the git/GitHub-API layer the fetcher used), never self-declared by the
+    fetched content. A SKILL.md ``version:``, a catalog-claimed semver, or a
+    bundle-declared ``commit``/``sha`` field is attacker-controlled on a mutable
+    source and is explicitly **not** accepted here — only a 40-hex commit that a
+    fetcher recorded under :data:`_TRANSPORT_COMMIT_KEY` from its own transport
+    response counts. Everything else returns ``None`` (activation then requires
+    an operator-provided expected digest or a break-glass opt-in, or it stays
+    quarantined).
+    """
+    meta = bundle.metadata or {}
+    value = str(meta.get(_TRANSPORT_COMMIT_KEY) or "").strip().lower()
+    if _SHA_RE.match(value):
+        return value
+    return None
+
+
+def bundle_is_first_party_local(bundle: SkillBundle) -> bool:
+    """True when the bundle was read from the installed Hermes tree.
+
+    First-party local skills (``optional-skills/`` shipped in the operator's own
+    checkout) carry the same trust as the rest of the installed code — their
+    integrity is topological (they are already on disk in the install), not a
+    network claim — so activation does not require a network identity. This flag
+    is set ONLY by the local-checkout fetch path, never from fetched content.
+    """
+    return bool((bundle.metadata or {}).get(_FIRST_PARTY_LOCAL_KEY))
+
+
 def source_url_for_bundle(bundle: SkillBundle) -> str:
     """Best available human-facing immutable-source provenance URL."""
     explicit = bundle.metadata.get("source_url") or bundle.metadata.get("url")
@@ -594,6 +655,9 @@ class GitHubSource(SkillSource):
         # Survives within a single search/install flow, avoiding redundant API calls.
         self._tree_cache: Dict[str, Tuple[str, List[dict]]] = {}
         self._tree_revisions: Dict[str, str] = {}
+        # Transport-resolved HEAD commit per repo (from the GitHub API, never
+        # from fetched content). Populated by _get_repo_head_commit.
+        self._head_commits: Dict[str, Optional[str]] = {}
         # Per-repo cache of the optional skills.sh.json grouping sidecar,
         # mapping skill_name -> human-readable grouping title. ``None`` means
         # "fetched, no sidecar"; a missing key means "not fetched yet".
@@ -698,19 +762,25 @@ class GitHubSource(SkillSource):
         skill_name = skill_path.rstrip("/").split("/")[-1]
         trust = self.trust_level_for(identifier)
 
+        # Transport-resolved HEAD commit (from the GitHub API, not content).
+        _resolved_commit = self._get_repo_head_commit(repo)
+        _md: Dict[str, Any] = {
+            "source_url": (
+                f"https://github.com/{repo}/tree/{revision}/{skill_path}"
+                if revision else f"https://github.com/{repo}/{skill_path}"
+            ),
+            "source_revision": revision,
+        }
+        if _resolved_commit:
+            _md["resolved_commit"] = _resolved_commit
+
         return SkillBundle(
             name=skill_name,
             files=files,
             source="github",
             identifier=identifier,
             trust_level=trust,
-            metadata={
-                "source_url": (
-                    f"https://github.com/{repo}/tree/{revision}/{skill_path}"
-                    if revision else f"https://github.com/{repo}/{skill_path}"
-                ),
-                "source_revision": revision,
-            },
+            metadata=_md,
         )
 
     def inspect(self, identifier: str) -> Optional[SkillMeta]:
@@ -854,6 +924,35 @@ class GitHubSource(SkillSource):
             self._tree_revisions[repo] = revision
         self._tree_cache[repo] = (default_branch, entries)
         return (default_branch, entries)
+
+    def _get_repo_head_commit(self, repo: str) -> Optional[str]:
+        """Transport-resolved 40-hex HEAD commit of *repo*'s default branch.
+
+        Resolved from the GitHub API (``GET /repos/{repo}/commits/HEAD``), never
+        from fetched content — this is the trusted exact identity a fetcher may
+        record so :func:`bundle_exact_identity` can accept it. Cached per repo
+        (``None`` cached too, so a rate-limited/unavailable API is not retried in
+        a tight loop). A self-declared SHA in SKILL.md never reaches this path.
+        """
+        if repo in self._head_commits:
+            return self._head_commits[repo]
+        headers = self.auth.get_headers()
+        sha: Optional[str] = None
+        try:
+            resp = httpx.get(
+                f"https://api.github.com/repos/{repo}/commits/HEAD",
+                headers=headers, timeout=15, follow_redirects=True,
+            )
+            if resp.status_code == 200:
+                value = resp.json().get("sha")
+                if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}", value):
+                    sha = value
+            else:
+                self._check_rate_limit_response(resp)
+        except (httpx.HTTPError, ValueError):
+            sha = None
+        self._head_commits[repo] = sha
+        return sha
 
     def _check_rate_limit_response(self, resp: "httpx.Response") -> None:
         """Flag the instance as rate-limited when GitHub returns 403 + exhausted quota."""
@@ -3431,7 +3530,7 @@ class OptionalSkillSource(SkillSource):
                 and "__pycache__" not in f.parts
                 and f.suffix != ".pyc"
             ):
-                rel_path = str(f.relative_to(skill_dir))
+                rel_path = f.relative_to(skill_dir).as_posix()
                 try:
                     files[rel_path] = f.read_bytes()
                 except OSError:
@@ -3449,6 +3548,7 @@ class OptionalSkillSource(SkillSource):
             source="official",
             identifier=f"official/{skill_dir.resolve().relative_to(self._optional_dir.resolve()).as_posix()}",
             trust_level="builtin",
+            metadata={"first_party_local": True},
         )
 
     # -- inspect ----------------------------------------------------------
@@ -3550,12 +3650,17 @@ class OptionalSkillSource(SkillSource):
             return None
 
         logger.info("Optional skill '%s' fetched from live repo (not in local checkout)", rel)
+        _live_md: Dict[str, Any] = {}
+        _live_commit = github._get_repo_head_commit(self.OFFICIAL_REPO)
+        if _live_commit:
+            _live_md["resolved_commit"] = _live_commit
         return SkillBundle(
             name=rel.rsplit("/", 1)[-1],
             files=files,
             source="official",
             identifier=f"official/{rel}",
             trust_level="builtin",
+            metadata=_live_md,
         )
 
     def _list_remote_skill_dirs(self) -> Dict[str, bool]:
@@ -3906,7 +4011,12 @@ def quarantine_bundle(bundle: SkillBundle) -> Path:
         if isinstance(file_content, bytes):
             file_dest.write_bytes(file_content)
         else:
-            file_dest.write_text(file_content, encoding="utf-8")
+            # newline="" prevents the platform newline translation that would
+            # rewrite "\n" as "\r\n" on Windows — the on-disk bytes must stay
+            # byte-identical to the bundle content so content_hash() (disk) and
+            # bundle_content_hash() (in-memory) agree, otherwise every installed
+            # skill reports update_available forever on Windows (#62310 class).
+            file_dest.write_text(file_content, encoding="utf-8", newline="")
 
     return dest
 
@@ -3944,10 +4054,71 @@ def install_from_quarantine(
     bundle: SkillBundle,
     scan_result: ScanResult,
     scan_provenance: Optional[Dict[str, Any]] = None,
+    *,
+    activation_accepted: bool = False,
+    expected_bundle_digest: Optional[str] = None,
 ) -> Path:
-    """Move a scanned skill from quarantine into the skills directory."""
+    """Move a scanned skill from quarantine into the skills directory.
+
+    ``activation_accepted`` records that the operator explicitly accepted this
+    activation (an interactive confirm, or a caller that represents a deliberate
+    operator install command). ``expected_bundle_digest`` is an operator- or
+    trusted-catalog-supplied digest that MUST equal the fetched bundle's
+    whole-bundle digest — the "expected identity" the plan requires, as opposed
+    to a digest computed only after download.
+    """
     safe_skill_name = _validate_skill_name(skill_name)
     safe_category = _validate_install_parent_path(category) if category else ""
+
+    # Supply-chain activation gate (WP4). Quarantine/discovery is always
+    # allowed; ACTIVATION (moving into the live skills tree) is authorized only
+    # by one of:
+    #   1. First-party local origin — the bundle was read from the installed
+    #      Hermes tree (topological trust; no network claim involved).
+    #   2. A TRANSPORT-RESOLVED commit (bundle_exact_identity) AND explicit
+    #      operator acceptance — the exact identity the operator agreed to,
+    #      recorded with the whole-bundle digest for audit/re-acceptance.
+    #   3. An operator/trusted-catalog EXPECTED digest that matches AND a
+    #      transport-resolved identity (fully non-interactive secure path).
+    #   4. A break-glass ``allow_unverified_components: ["skills"]`` opt-in
+    #      (labelled unverified).
+    # A self-declared semver or a bundle-claimed SHA is NOT an identity and is
+    # never sufficient. Anything else fails closed (stays quarantined).
+    bundle_digest = _whole_bundle_digest(bundle)
+    exact_identity = bundle_exact_identity(bundle)
+    first_party = bundle_is_first_party_local(bundle)
+
+    if not first_party:
+        import hmac
+
+        digest_ok = bool(
+            expected_bundle_digest
+            and hmac.compare_digest(str(expected_bundle_digest).strip().lower(), bundle_digest)
+        )
+        try:
+            from hermes_cli.supply_chain.gate import compat_opt_in
+
+            _skills_break_glass = compat_opt_in("skills")
+        except Exception:
+            _skills_break_glass = False
+
+        authorized = (
+            (digest_ok and exact_identity is not None)          # (3) expected digest + identity
+            or (activation_accepted and exact_identity is not None)  # (2) exact identity + acceptance
+            or _skills_break_glass                               # (4) break-glass opt-in
+        )
+        if not authorized:
+            raise ValueError(
+                f"Refusing to activate skill '{safe_skill_name}': its source is "
+                f"network/mutable and lacks a transport-resolved exact identity "
+                f"(a self-declared version or SHA does not count). Discovery "
+                f"stays quarantined. Activate by pinning a transport-resolved "
+                f"commit and accepting it, by passing the expected whole-bundle "
+                f"digest ({bundle_digest[:12]}…), or by explicit break-glass: "
+                f"security.supply_chain.allow_unverified_components: [\"skills\"]. "
+                f"See docs/security/supply-chain-migration.md."
+            )
+
     quarantine_resolved = quarantine_path.resolve()
     quarantine_root = _quarantine_dir().resolve()
     if not quarantine_resolved.is_relative_to(quarantine_root):
@@ -4044,6 +4215,10 @@ def install_from_quarantine(
     shutil.move(str(quarantine_path), str(install_dir))
 
     # Record in lock file
+    _provenance_meta = dict(bundle.metadata or {})
+    _provenance_meta["whole_bundle_sha256"] = bundle_digest
+    if exact_identity is not None:
+        _provenance_meta["resolved_identity"] = exact_identity
     lock = HubLockFile()
     lock.record_install(
         name=safe_skill_name,
@@ -4054,7 +4229,7 @@ def install_from_quarantine(
         skill_hash=content_hash(install_dir),
         install_path=install_dir.resolve().relative_to(_skills_dir().resolve()).as_posix(),
         files=list(bundle.files.keys()),
-        metadata=bundle.metadata,
+        metadata=_provenance_meta,
         scan_provenance=scan_provenance or getattr(scan_result, "scan_provenance", None),
     )
 

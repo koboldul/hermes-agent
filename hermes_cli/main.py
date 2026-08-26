@@ -2321,7 +2321,8 @@ def _ensure_tui_workspace(tui_dir: Path) -> None:
         "This usually means `hermes update` left tracked ui-tui files deleted.\n"
         "Recovery:\n"
         "  1. From the Hermes checkout, run `git restore -- ui-tui`\n"
-        "  2. Run `npm install --silent --no-fund --no-audit --progress=false`\n"
+        "  2. Run `npm install --ignore-scripts --no-fund --no-audit --progress=false`,\n"
+        "     then `node apps/desktop/scripts/run-allowed-lifecycle.mjs` (reviewed lifecycle only)\n"
         "  3. Retry `hermes --tui`\n"
         "If the checkout is still inconsistent, run `hermes update --force`.",
         file=sys.stderr,
@@ -3427,7 +3428,12 @@ def cmd_whatsapp(args):
             return
         try:
             result = subprocess.run(
-                [npm, "install", "--no-fund", "--no-audit", "--progress=false"],
+                # A4 audited lifecycle: the WhatsApp bridge (scripts/whatsapp-
+                # bridge) is a first-party package with a committed lockfile, no
+                # first-party install script, and only pure-JS runtime deps, so
+                # --ignore-scripts is the complete guarantee no dependency runs
+                # arbitrary install-time code (nothing needs a native rebuild).
+                [npm, "install", "--ignore-scripts", "--no-fund", "--no-audit", "--progress=false"],
                 cwd=str(bridge_dir),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
@@ -6145,6 +6151,54 @@ def _nixos_build_env() -> dict[str, str] | None:
         pass  # nix-shell not available — caller will get None
 
     return None
+def _run_allowed_lifecycle(
+    cwd: Path,
+    *,
+    env: dict[str, str] | None = None,
+    timeout: float = 600.0,
+) -> None:
+    """A4 audited lifecycle: after ``npm install --ignore-scripts`` run ONLY the
+    reviewed, allowlisted lifecycle scripts (node-pty prebuild, esbuild,
+    electron binary, ...) via the audited orchestrator. ``get-windows`` is on the
+    orchestrator's deny-list and is never rebuilt.
+
+    The orchestrator (``apps/desktop/scripts/run-allowed-lifecycle.mjs``) reads
+    the workspace-root ``package.json`` ``allowScripts`` + lockfile and runs
+    ``npm rebuild <allowlisted>`` for each package whose lock version matches.
+    ``npm rebuild`` of a package that is absent from ``node_modules`` (e.g.
+    electron during a web-only workspace install) is a safe no-op, so this is
+    correct regardless of which workspace subset ``cwd`` installed. Best-effort:
+    a rebuild failure surfaces at the subsequent build step, not here.
+    """
+    orchestrator: Path | None = None
+    root = cwd
+    for cand in (cwd, *cwd.parents):
+        candidate = cand / "apps" / "desktop" / "scripts" / "run-allowed-lifecycle.mjs"
+        if candidate.exists():
+            orchestrator = candidate
+            root = cand
+            break
+    if orchestrator is None:
+        return
+    from hermes_constants import find_node_executable
+
+    node = find_node_executable("node") or "node"
+    try:
+        subprocess.run(  # noqa: S603
+            [node, str(orchestrator)],
+            cwd=str(root),
+            env=env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
 def _run_npm_install_deterministic(
     npm: str,
     cwd: Path,
@@ -6181,9 +6235,13 @@ def _run_npm_install_deterministic(
     self-reinforcing cycle where web devDeps never install and a stale dist
     is served on every update (PR #65595).
     """
-    # unicode-animations' postinstall animates to /dev/tty (bypasses
-    # --silent/capture_output). It no-ops when CI is set — same as the TUI
-    # install path and nix/lib.nix npm ci hooks.
+    # A4 audited lifecycle: both `npm ci` and the `npm install` fallback run
+    # with --ignore-scripts, so NO dependency runs arbitrary install-time code
+    # (unicode-animations' /dev/tty postinstall, get-windows' node-pre-gyp, ...).
+    # The reviewed, allowlisted native lifecycle (node-pty prebuild, esbuild,
+    # electron binary) then runs via _run_allowed_lifecycle below. CI=1 in
+    # _npm_lifecycle_env is retained as defense-in-depth for the rare tool that
+    # still shells a lifecycle script through a path --ignore-scripts misses.
     run_env = _npm_lifecycle_env(env)
 
     def _run(cmd: list[str]) -> subprocess.CompletedProcess:
@@ -6197,15 +6255,16 @@ def _run_npm_install_deterministic(
     def _attempt(npm_exe: str) -> subprocess.CompletedProcess:
         lockfile = cwd / "package-lock.json"
         if lockfile.exists():
-            ci_result = _run([npm_exe, "ci", "--include=dev", *extra_args])
+            ci_result = _run([npm_exe, "ci", "--include=dev", "--ignore-scripts", *extra_args])
             if ci_result.returncode == 0:
                 return ci_result
             # Fall through to `npm install` — lockfile may be out of sync on a
             # WIP fork/branch, or `npm ci` may not be available on very old npm.
-        return _run([npm_exe, "install", "--no-save", "--include=dev", *extra_args])
+        return _run([npm_exe, "install", "--no-save", "--include=dev", "--ignore-scripts", *extra_args])
 
     result = _attempt(npm)
     if result.returncode == 0:
+        _run_allowed_lifecycle(cwd, env=run_env)
         return result
 
     # An npm outside the root package.json's `engines.npm` range fails every
@@ -6226,7 +6285,10 @@ def _run_npm_install_deterministic(
     from hermes_constants import with_hermes_node_path
 
     run_env["PATH"] = with_hermes_node_path(run_env)["PATH"]
-    return _attempt(repaired_npm)
+    final = _attempt(repaired_npm)
+    if final.returncode == 0:
+        _run_allowed_lifecycle(cwd, env=run_env)
+    return final
 
 
 def _run_npm_watching_for_engine_failure(
@@ -6373,7 +6435,7 @@ def _do_build_web_ui(web_dir: Path, *, fatal: bool = False) -> bool:
     if not npm:
         if fatal:
             _say("Web UI frontend not built and npm is not available.")
-            _say("Install Node.js, then run:  cd web && npm install && npm run build")
+            _say("Install Node.js, then run:  cd web && npm install --ignore-scripts && node ../apps/desktop/scripts/run-allowed-lifecycle.mjs && npm run build")
         return not fatal
     build_env = _npm_lifecycle_env(with_hermes_node_path())
     _say("→ Building web UI...")
@@ -6438,7 +6500,7 @@ def _do_build_web_ui(web_dir: Path, *, fatal: bool = False) -> bool:
         )
         _relay(r1)
         if fatal:
-            _say("  Run manually:  npm install --workspace web && npm run build -w web")
+            _say("  Run manually:  npm ci --workspace web --ignore-scripts && node apps/desktop/scripts/run-allowed-lifecycle.mjs && npm run build -w web")
         return False
     # First attempt — stream output via idle-timeout helper (issue #33788).
     # capture_output=True on a long Vite build looks identical to a hang;
@@ -6491,7 +6553,7 @@ def _do_build_web_ui(web_dir: Path, *, fatal: bool = False) -> bool:
         )
         _relay(r2)
         if fatal:
-            _say("  Run manually:  npm install --workspace web && npm run build -w web")
+            _say("  Run manually:  npm ci --workspace web --ignore-scripts && node apps/desktop/scripts/run-allowed-lifecycle.mjs && npm run build -w web")
         return False
     _say("  ✓ Web UI built")
     project_root = web_dir.parent.parent if web_dir.parent.name == "apps" else web_dir.parent
@@ -7924,7 +7986,7 @@ def cmd_gui(args: argparse.Namespace):
                 sys.exit(1)
             if not (_electron_dir(PROJECT_ROOT) / "package.json").exists():
                 print("✗ --skip-build --source requires existing desktop workspace dependencies.")
-                print(f"  Install first:  cd {PROJECT_ROOT} && npm ci")
+                print(f"  Install first:  cd {PROJECT_ROOT} && npm ci --ignore-scripts && node apps/desktop/scripts/run-allowed-lifecycle.mjs")
                 print("  Or drop --skip-build to install dependencies and build automatically.")
                 sys.exit(1)
             print(f"→ Skipping desktop source build (--skip-build --source); using dist at {desktop_dir / 'dist'}")
@@ -7960,7 +8022,7 @@ def cmd_gui(args: argparse.Namespace):
             if install_result.returncode != 0:
                 if not _electron_pkg_staged_missing_dist(PROJECT_ROOT):
                     print("✗ Desktop dependency install failed")
-                    print(f"  Run manually:  cd {PROJECT_ROOT} && npm ci")
+                    print(f"  Run manually:  cd {PROJECT_ROOT} && npm ci --ignore-scripts && node apps/desktop/scripts/run-allowed-lifecycle.mjs")
                     sys.exit(install_result.returncode or 1)
                 repaired = _try_redownload_electron_dist(PROJECT_ROOT, env)
                 if repaired:
@@ -11749,7 +11811,7 @@ def cmd_dashboard(args):
                 print(f"✗ --skip-build was passed but no web dist found at: {_dist_root}")
                 if _recoverable:
                     print("  The recovery build did not produce a usable dist.")
-                print("  Pre-build first:  npm install --workspace web && npm run build -w web")
+                print("  Pre-build first:  npm ci --workspace web --ignore-scripts && node apps/desktop/scripts/run-allowed-lifecycle.mjs && npm run build -w web")
                 print("  Or drop --skip-build to build automatically.")
                 sys.exit(1)
             print("  ✓ Recovery build produced a web dist")
@@ -11763,7 +11825,7 @@ def cmd_dashboard(args):
         _dist_root = Path(os.environ["HERMES_WEB_DIST"]).expanduser()
         if not (_dist_root / "index.html").exists():
             print(f"✗ HERMES_WEB_DIST is set but no web dist found at: {_dist_root}")
-            print("  Pre-build first:  npm install --workspace web && npm run build -w web")
+            print("  Pre-build first:  npm ci --workspace web --ignore-scripts && node apps/desktop/scripts/run-allowed-lifecycle.mjs && npm run build -w web")
             print("  Or unset HERMES_WEB_DIST to build and use the default web UI dist.")
             sys.exit(1)
         # Write the expanded path back: web_server reads HERMES_WEB_DIST raw

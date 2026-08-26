@@ -29,6 +29,17 @@ from unittest.mock import patch
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _opt_in_unverified(monkeypatch):
+    # The cua-driver installer is now the explicit transport-trusted
+    # compatibility path (the secure default disables auto-install because the
+    # upstream installer runs code from a mutable branch). Opt in (config gate)
+    # so the installer mechanics run.
+    monkeypatch.setattr(
+        "hermes_cli.supply_chain.gate._sc_config", lambda: {"enforce": True, "allow_unverified_components": ["*"]}
+    )
+
+
 def _runtime_manifest(version="0.20.0", *, omit=None):
     omit = set(omit or ())
     required = {

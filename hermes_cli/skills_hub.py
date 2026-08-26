@@ -780,7 +780,15 @@ def do_install(identifier: str, category: str = "", force: bool = False,
 
     # Install
     try:
-        install_dir = install_from_quarantine(q_path, bundle.name, category, bundle, result)
+        # Reaching here means the operator either confirmed interactively or
+        # deliberately invoked a non-interactive install (skip_confirm) — an
+        # explicit activation acceptance. The gate still requires a
+        # transport-resolved exact identity (or a first-party/break-glass path);
+        # acceptance alone never activates a network source with no identity.
+        install_dir = install_from_quarantine(
+            q_path, bundle.name, category, bundle, result,
+            activation_accepted=True,
+        )
     except ValueError as exc:
         c.print(f"[bold red]Installation blocked:[/] {exc}\n")
         shutil.rmtree(q_path, ignore_errors=True)

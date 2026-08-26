@@ -302,6 +302,27 @@ def _managed_bin_dir() -> Optional[str]:
         return None
 
 
+def _uv_tool_dir() -> Optional[str]:
+    """Profile-scoped uv tool-environment root ($HERMES_HOME/uv-tools).
+
+    Setting UV_TOOL_DIR here keeps the browser-use package venv inside the
+    profile (not the shared ~/.local/share/uv/tools), so the provenance marker
+    can bind a known tree and different profiles never share one tool env."""
+    try:
+        from hermes_constants import get_hermes_home
+
+        return str(Path(get_hermes_home()) / "uv-tools")
+    except Exception as e:  # pragma: no cover — defensive
+        logger.debug("Could not resolve uv tool dir: %s", e)
+        return None
+
+
+def _browser_use_tool_tree() -> Optional[str]:
+    """The uv tool-environment tree for browser-use (UV_TOOL_DIR/browser-use)."""
+    base = _uv_tool_dir()
+    return str(Path(base) / "browser-use") if base else None
+
+
 def _user_local_bin_dir() -> Optional[str]:
     """The standard user-level tool dir (~/.local/bin on POSIX; uv's default
     tool bin dir on Windows). Desktop/TUI workers may start with a minimal
@@ -331,17 +352,51 @@ def _find_cli() -> Optional[List[str]]:
     and cover Desktop/TUI workers that spawn with a minimal PATH. The uvx
     zero-install path (same probe order) is the final fallback.
     """
-    probe_paths = (_managed_bin_dir(), None, _user_local_bin_dir())
+    managed_dir = _managed_bin_dir()
+    probe_paths = (managed_dir, None, _user_local_bin_dir())
     for probe_path in probe_paths:
-        if probe_path is None or probe_path:
-            direct = shutil.which("browser-use", path=probe_path)
-            if direct:
-                return [direct]
-    for probe_path in probe_paths:
-        if probe_path is None or probe_path:
-            uvx = shutil.which("uvx", path=probe_path)
-            if uvx:
-                return [uvx, "browser-use"]
+        if not (probe_path is None or probe_path):
+            continue
+        direct = shutil.which("browser-use", path=probe_path)
+        if not direct:
+            continue
+        # A6: the Hermes-managed copy ($HERMES_HOME/bin) is trusted only with a
+        # current provenance marker. PATH / user-local copies are operator-owned
+        # and used in place — BUT a PATH/symlink/junction/case alias that lands
+        # inside the managed root is the managed binary in disguise and must NOT
+        # bypass the marker check (accept_operator_path rejects an unmarked one).
+        from hermes_cli.supply_chain.managed import accept_operator_path, tool_marker_ok
+
+        if probe_path == managed_dir:
+            tree = _browser_use_tool_tree()
+            try:
+                if tree and tool_marker_ok(direct, tree_dir=tree, component="browser-use"):
+                    return [direct]
+            except Exception:
+                pass
+            logger.info(
+                "managed browser-use at %s has no valid launcher+tree provenance "
+                "marker; ignoring it (A6)", direct,
+            )
+            continue
+        accepted = accept_operator_path(direct, component="browser-use")
+        if accepted:
+            return [accepted]
+    # The uvx zero-install fallback resolves browser-use from the network at
+    # launch. Disabled by default (supply-chain enforce) — require an installed
+    # binary; explicit opt-in re-enables network resolution.
+    try:
+        from hermes_cli.supply_chain.gate import compat_opt_in
+
+        _allow_uvx = compat_opt_in("browser-use")
+    except Exception:
+        _allow_uvx = False
+    if _allow_uvx:
+        for probe_path in probe_paths:
+            if probe_path is None or probe_path:
+                uvx = shutil.which("uvx", path=probe_path)
+                if uvx:
+                    return [uvx, "browser-use"]
     return None
 
 
@@ -364,7 +419,33 @@ def install_cli(timeout_s: int = 600) -> Tuple[bool, str]:
     if bin_dir:
         managed = shutil.which("browser-use", path=bin_dir)
         if managed:
-            return True, f"browser-use CLI already installed ({managed})"
+            # A6: a managed browser-use short-circuits the install ONLY with a
+            # current launcher+tree provenance marker. An unmarked/tampered
+            # legacy copy is quarantined here — before the installer fallback —
+            # so it can never run unmarked, then a fresh verified install
+            # replaces it.
+            from hermes_cli.supply_chain.managed import quarantine_unmarked, tool_marker_ok
+
+            tree = _browser_use_tool_tree()
+            if tree and tool_marker_ok(managed, tree_dir=tree, component="browser-use"):
+                return True, f"browser-use CLI already installed ({managed})"
+            quarantine_unmarked(managed, component="browser-use")
+
+    # Supply-chain gate (WP4): the browser-use install resolves an unpinned
+    # package from the network (uv tool install). Disabled by default.
+    try:
+        from hermes_cli.supply_chain.gate import compat_opt_in
+
+        _bu_ok = compat_opt_in("browser-use")
+    except Exception:
+        _bu_ok = False
+    if not _bu_ok:
+        return False, (
+            "browser-use auto-install is disabled by default (supply-chain "
+            "enforce): it resolves an unpinned package from the network. Allow "
+            "it in config: security.supply_chain.allow_unverified_components: "
+            "[\"browser-use\"]. See docs/security/supply-chain-migration.md."
+        )
 
     uv_bin: Optional[str] = None
     try:
@@ -374,7 +455,12 @@ def install_cli(timeout_s: int = 600) -> Tuple[bool, str]:
     except Exception as e:
         logger.debug("Managed uv bootstrap unavailable: %s", e)
     if not uv_bin:
-        uv_bin = shutil.which("uv")
+        # Classifier-gate the PATH fallback: a uv reached via a PATH/symlink/
+        # case alias into any profile's managed root must present its provenance
+        # marker rather than run on the alias.
+        from hermes_cli.supply_chain.managed import accept_operator_path
+
+        uv_bin = accept_operator_path(shutil.which("uv"), component="uv")
     if not uv_bin:
         return False, (
             "uv is not available and could not be bootstrapped. Install uv "
@@ -383,6 +469,15 @@ def install_cli(timeout_s: int = 600) -> Tuple[bool, str]:
 
     env = dict(os.environ)
     env["UV_NO_CONFIG"] = "1"
+    # Profile-scoped tool environment + launcher bin, so the provenance marker
+    # binds a known tree and profiles never share a tool env.
+    tool_dir = _uv_tool_dir()
+    if tool_dir:
+        try:
+            Path(tool_dir).mkdir(parents=True, exist_ok=True)
+            env["UV_TOOL_DIR"] = tool_dir
+        except OSError as e:
+            logger.debug("Could not prepare %s: %s", tool_dir, e)
     if bin_dir:
         try:
             Path(bin_dir).mkdir(parents=True, exist_ok=True)
@@ -410,6 +505,24 @@ def install_cli(timeout_s: int = 600) -> Tuple[bool, str]:
             (result.stderr or result.stdout or "").strip().splitlines()[-3:]
         )
         return False, f"`uv tool install browser-use` failed:\n{tail}"
+
+    # A6: mark the freshly-installed managed browser-use so it is trusted on the
+    # next resolve. The marker binds BOTH the launcher bytes AND the entire tool
+    # environment tree; _find_cli() (marker-verified) rehashes both. Write it
+    # BEFORE _find_cli().
+    if bin_dir:
+        raw = shutil.which("browser-use", path=bin_dir)
+        tree = _browser_use_tool_tree()
+        if raw and tree:
+            try:
+                from hermes_cli.supply_chain.managed import write_tool_marker
+
+                write_tool_marker(
+                    raw, tree_dir=tree, component="browser-use",
+                    version="installed", provenance="operator_compat_opt_in",
+                )
+            except Exception as e:  # pragma: no cover - marker best-effort
+                logger.debug("could not write browser-use provenance marker: %s", e)
 
     found = _find_cli()
     if not found or len(found) != 1:

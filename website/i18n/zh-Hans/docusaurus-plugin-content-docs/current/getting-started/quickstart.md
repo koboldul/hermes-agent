@@ -48,6 +48,15 @@ description: "与 Hermes Agent 的第一次对话——从安装到开始聊天�
 
 ## 1. 安装 Hermes Agent
 
+:::warning 前置条件：请先安装 `uv`
+Hermes 使用 [`uv`](https://docs.astral.sh/uv/) 构建其 Python 环境。出于供应链安全考虑，安装程序使用由操作者安装的 `uv`，**不会**自动下载它——请在运行下方任何命令前先安装 `uv`：
+
+- **Linux / macOS / WSL2：** `pipx install uv`（或 `brew install uv`）
+- **Windows（原生，PowerShell）：** `winget install astral-sh.uv`
+
+用 `uv --version` 确认。若 `uv`、Node.js 或 Git 缺失，安装程序会停止并给出确切的修复命令，而不会拉取未经验证的二进制文件。**Android/Termux 例外**（使用 `pip`，而非 `uv`）。详见[安装指南](./installation.md)。
+:::
+
 ### 在 macOS 或 Windows 上使用 Hermes Desktop 安装器（推荐）
 
 如需同时安装命令行与桌面应用，请从我们的官网[下载 Hermes Desktop 安装器](https://hermes-agent.nousresearch.com/)并运行。

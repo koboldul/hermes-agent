@@ -827,8 +827,50 @@ def _migrate_to_38(results: Dict[str, Any], quiet: bool) -> None:
         print(f"  ⚠ {message}")
 
 
+def _migrate_to_39(results: Dict[str, Any], quiet: bool) -> None:
+    # Version 38 → 39: LSP auto-install now requires affirmative, versioned
+    # consent (SEC-AUDIT-002). A legacy ``lsp.install_strategy: auto`` value
+    # with no matching ``auto_install_consent_version`` marker is implicit
+    # default materialisation — NOT operator consent — so downgrade it to
+    # effective ``manual``. Any other explicit strategy (``manual``/``off``)
+    # is the user's own and is preserved; a config already carrying a matching
+    # consent marker keeps ``auto``.
+    _c = _cfg()
+    read_raw_config = _c.read_raw_config
+    _persist_migration = _c._persist_migration
+
+    from agent.lsp.consent import CONSENT_KEY, CONSENT_POLICY_VERSION
+
+    config = read_raw_config()
+    lsp = config.get("lsp")
+    if not isinstance(lsp, dict):
+        return
+    raw_strategy = str(lsp.get("install_strategy", "")).strip().lower()
+    if raw_strategy != "auto":
+        return
+    consent = lsp.get(CONSENT_KEY)
+    consent_ok = (
+        (isinstance(consent, int) and not isinstance(consent, bool))
+        or (isinstance(consent, str) and consent.strip().isdigit())
+    ) and int(consent) == CONSENT_POLICY_VERSION
+    if consent_ok:
+        return
+    lsp["install_strategy"] = "manual"
+    lsp.pop(CONSENT_KEY, None)
+    config["lsp"] = lsp
+    _persist_migration(config)
+    message = (
+        "LSP auto-install now requires explicit consent: install_strategy "
+        "downgraded to 'manual'. Re-enable the pinned, reviewed LSP bundle "
+        "with `hermes lsp enable-auto-install`."
+    )
+    results["config_added"].append("lsp.install_strategy=manual (was: auto, unconsented)")
+    results["warnings"].append(message)
+    if not quiet:
+        print(f"  ⚠ {message}")
+
+
 #: Registry of (target_version, migration_fn), strictly ascending. The driver
-#: applies every entry whose target version is greater than the on-disk
 #: observe earlier steps' writes via read_raw_config() (filesystem state).
 MIGRATIONS: Tuple[Tuple[int, Callable[[Dict[str, Any], bool], None]], ...] = (
     # v12 is the support floor: configs already AT v12 (or newer) still get
@@ -853,6 +895,7 @@ MIGRATIONS: Tuple[Tuple[int, Callable[[Dict[str, Any], bool], None]], ...] = (
     (36, _migrate_to_36),
     (37, _migrate_to_37),
     (38, _migrate_to_38),
+    (39, _migrate_to_39),
 )
 
 

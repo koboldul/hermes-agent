@@ -409,6 +409,8 @@ export const zhHant = defineLocale({
       embedsAlways: '一律',
       embedsOff: '關閉',
       embedsReset: (count: number) => `重設 ${count} 個已允許的服務`,
+      linkPreviewsTitle: '連結預覽',
+      linkPreviewsDesc: '為連結取得頁面標題與網站圖示。預設關閉：開啟前 Hermes 不會發出任何請求，且應用程式會驗證並固定每個目標位址。',
       product: '產品',
       productDesc: '易讀的工具活動與精簡摘要。',
       technical: '技術',

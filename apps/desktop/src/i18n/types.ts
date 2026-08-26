@@ -486,6 +486,8 @@ export interface Translations {
       embedsAlways: string
       embedsOff: string
       embedsReset: (count: number) => string
+      linkPreviewsTitle: string
+      linkPreviewsDesc: string
       product: string
       productDesc: string
       technical: string
@@ -1156,6 +1158,15 @@ export interface Translations {
       actionFailed: string
       actionLog: string
       alreadyInstalled: (name: string) => string
+      confirmTitle: (name: string) => string
+      confirmDetail: string
+      confirmSource: (source: string) => string
+      confirmCommitLabel: string
+      confirmDigestLabel: string
+      confirmUnverifiedCommit: string
+      confirmResolving: string
+      confirmInstall: string
+      confirmCancel: string
       pickerTitle: string
       pickerBrowse: string
       pickerHide: string

@@ -34,6 +34,13 @@ Usa cualquier modelo que quieras — [Nous Portal](https://portal.nousresearch.c
 
 ## Instalación rápida
 
+> **Requisito previo — instala `uv` primero.** Hermes construye su entorno de Python con [`uv`](https://docs.astral.sh/uv/) (el gestor de paquetes de Astral). Por seguridad de la cadena de suministro, el instalador **no** descarga `uv` automáticamente; usa un `uv` instalado por el operador y, si falta, se detiene con instrucciones. Instálalo primero y luego ejecuta el comando de tu plataforma:
+>
+> - **Linux / macOS / WSL2:** `pipx install uv` — o `brew install uv` — o la [guía oficial de uv](https://docs.astral.sh/uv/getting-started/installation/).
+> - **Windows (PowerShell):** `winget install astral-sh.uv`
+>
+> Verifica con `uv --version`. Node.js y Git se tratan igual — instálalos con tu gestor si el instalador los reporta como ausentes. (**Android/Termux está exento** — usa el `venv` + `pip` de la biblioteca estándar de Python, sin `uv`.) (Solo para casos excepcionales: `--allow-unverified-bootstrap` / `-AllowUnverifiedBootstrap` permite que el instalador los descargue de fuentes no verificadas — no recomendado.)
+
 ### Linux, macOS, WSL2, Termux
 
 ```bash
@@ -50,13 +57,13 @@ Ejecuta esto en PowerShell:
 iex (irm https://hermes-agent.nousresearch.com/install.ps1)
 ```
 
-El instalador se encarga de todo: uv, Python 3.11, Node.js, ripgrep, ffmpeg, **y un Git Bash portátil** (MinGit, descomprimido en `%LOCALAPPDATA%\hermes\git` — no requiere administrador, completamente aislado de cualquier instalación de Git del sistema). Hermes usa este Git Bash incluido para ejecutar comandos de shell.
+Con `uv` instalado (ver el requisito previo arriba), el instalador se encarga del resto: Python 3.11, ripgrep, ffmpeg, **y un Git Bash portátil** (MinGit, descomprimido en `%LOCALAPPDATA%\hermes\git` — no requiere administrador, completamente aislado de cualquier instalación de Git del sistema). Hermes usa este Git Bash incluido para ejecutar comandos de shell. Si faltan `uv`, Node.js o Git, el instalador se detiene y te indica el comando exacto para instalarlos (`winget install astral-sh.uv`) en lugar de descargar binarios no verificados.
 
 Si ya tienes Git instalado, el instalador lo detecta y lo usa en su lugar. De lo contrario, una descarga de ~45MB de MinGit es todo lo que necesitas — no tocará ni interferirá con ningún Git del sistema.
 
 > **Android / Termux:** La ruta manual probada está documentada en la [guía de Termux](https://hermes-agent.nousresearch.com/docs/getting-started/termux). En Termux, Hermes instala el extra `.[termux]` curado porque el extra completo `.[all]` actualmente incluye dependencias de voz incompatibles con Android.
 >
-> **Windows:** Windows nativo es totalmente compatible — el comando de PowerShell de arriba instala todo. Si prefieres usar WSL2, el comando de Linux también funciona allí. La instalación nativa de Windows se encuentra en `%LOCALAPPDATA%\hermes`; WSL2 instala en `~/.hermes` como en Linux.
+> **Windows:** Windows nativo es totalmente compatible — una vez instalado `uv` (`winget install astral-sh.uv`), el comando de PowerShell de arriba instala el resto. Si prefieres usar WSL2, el comando de Linux también funciona allí. La instalación nativa de Windows se encuentra en `%LOCALAPPDATA%\hermes`; WSL2 instala en `~/.hermes` como en Linux.
 
 Después de la instalación:
 

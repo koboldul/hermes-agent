@@ -23,6 +23,20 @@ from hermes_cli.plugins_cmd import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _plugins_gate_opt_in(monkeypatch):
+    """WP4 gates plugin install/update from a mutable git HEAD behind the
+    supply-chain posture (``compat_opt_in('plugins')``). These E2E tests clone a
+    real local repo at HEAD to exercise the subdir-install MECHANICS, so opt in;
+    the fail-closed default is proved in tests/supply_chain/test_extension_gates.py.
+    """
+    monkeypatch.setattr(
+        "hermes_cli.supply_chain.gate._sc_config",
+        lambda: {"enforce": True, "allow_unverified_components": ["*"]},
+        raising=False,
+    )
+
+
 # ── _sanitize_plugin_name ─────────────────────────────────────────────────
 
 
@@ -397,29 +411,53 @@ class TestCmdInstall:
 class TestCmdUpdate:
     """Test the update command."""
 
-    @patch("hermes_cli.plugins_cmd._sanitize_plugin_name")
+    @patch("hermes_cli.plugins_cmd._install_plugin_core")
+    @patch("hermes_cli.plugins_cmd._read_install_metadata")
+    @patch("hermes_cli.plugins_cmd._require_installed_plugin")
     @patch("hermes_cli.plugins_cmd._plugins_dir")
-    @patch("hermes_cli.plugins_cmd.subprocess.run")
-    def test_update_git_pull_success(self, mock_run, mock_plugins_dir, mock_sanitize):
+    def test_update_routes_through_quarantine_install(
+        self, mock_plugins_dir, mock_require, mock_meta, mock_core, tmp_path
+    ):
+        """A5: update re-clones into quarantine via _install_plugin_core (which
+        gates/scans/atomically swaps), never an in-place git pull."""
         from hermes_cli.plugins_cmd import cmd_update
 
-        mock_plugins_dir_val = MagicMock()
-        mock_plugins_dir.return_value = mock_plugins_dir_val
-        mock_target = MagicMock()
-        mock_target.exists.return_value = True
-        mock_target.__truediv__ = lambda self, x: MagicMock(
-            exists=MagicMock(return_value=True)
-        )
-        mock_sanitize.return_value = mock_target
+        target = tmp_path / "test-plugin"
+        (target / ".git").mkdir(parents=True)
+        (target / "plugin.yaml").write_text("name: test-plugin\n", encoding="utf-8")
+        mock_require.return_value = target
+        mock_meta.return_value = {"test-plugin": {"source": "https://github.com/a/b", "pinned": False}}
+        # _install_plugin_core returns (target, manifest, name); block downstream
+        # capability re-consent by returning a minimal manifest.
+        mock_core.return_value = (target, {"name": "test-plugin"}, "test-plugin")
 
-        mock_run.side_effect = [
-            MagicMock(returncode=0, stdout="", stderr=""),        # status: clean
-            MagicMock(returncode=0, stdout="Updated", stderr=""),  # pull
-        ]
+        with patch("hermes_cli.plugins_cmd._clear_plugin_bytecode"), \
+             patch("hermes_cli.plugins_cmd._copy_example_files"), \
+             patch("hermes_cli.plugins_cmd._read_manifest", return_value={"name": "test-plugin"}), \
+             patch("hermes_cli.plugins_cmd._declared_capabilities_from_manifest", return_value=set()):
+            cmd_update("test-plugin")
 
-        cmd_update("test-plugin")
+        # It routed through the quarantine installer with force=True.
+        assert mock_core.called
+        assert mock_core.call_args.kwargs.get("force") is True
 
-        assert mock_run.call_count == 2
+    @patch("hermes_cli.plugins_cmd._read_install_metadata")
+    @patch("hermes_cli.plugins_cmd._require_installed_plugin")
+    @patch("hermes_cli.plugins_cmd._plugins_dir")
+    def test_update_no_recorded_source_fails_closed(
+        self, mock_plugins_dir, mock_require, mock_meta, tmp_path
+    ):
+        """A5: a legacy plugin with no recorded source must NOT pull mutable HEAD."""
+        from hermes_cli.plugins_cmd import cmd_update
+
+        target = tmp_path / "legacy"
+        (target / ".git").mkdir(parents=True)
+        mock_require.return_value = target
+        mock_meta.return_value = {"legacy": {"pinned": False}}  # no source
+
+        with pytest.raises(SystemExit) as exc:
+            cmd_update("legacy")
+        assert exc.value.code == 1
 
     @patch("hermes_cli.plugins_cmd._sanitize_plugin_name")
     @patch("hermes_cli.plugins_cmd._plugins_dir")

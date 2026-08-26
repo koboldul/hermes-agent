@@ -410,6 +410,137 @@ def hermes_managed_node_tree_present(home: Path | None = None) -> bool:
     return False
 
 
+# --- Managed-node provenance markers (WP4 A6/A1) --------------------------
+#
+# A Hermes-managed Node tree is EXECUTED only when it carries a current
+# provenance marker (a ``.provenance.json`` sidecar on the node executable)
+# that binds the COMPLETE tree: the node executable's bytes AND a deterministic
+# digest over the whole ``<home>/node`` tree — the node binary, the npm/npx
+# wrappers, and the npm CLI JS under ``node_modules/npm``. A swap of ANY of them
+# (node, npm, npx, or a single npm library file) changes a bound digest and is
+# rejected. The marker is written the moment Hermes places a verified tree
+# (heal/bootstrap). An *unmarked* legacy tree — installed before markers
+# existed, or dropped in by another process — and a *tampered* tree are both
+# ignored: the caller falls back to an operator-PATH Node used in place, or
+# fails closed.
+#
+# A1 (final): there is NO size/mtime cache. A same-size, mtime-restored in-place
+# edit of a single file (a ``touch -r`` after a byte swap) would defeat a
+# (size, mtime) cache, so the whole tree is rehashed on EVERY resolve and such a
+# mutation is still caught. node/npm/npx are validated together — the marker
+# binds the whole tree — BEFORE any ``node --version`` probe executes.
+_MANAGED_NODE_COMPONENT = "node"
+
+
+def _managed_node_anchor(directory: Path | None) -> Path | None:
+    """Return the node executable that anchors *directory*'s provenance marker."""
+    if directory is None:
+        return None
+    for name in ("node.exe", "node"):
+        candidate = Path(directory) / name
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _managed_node_tree_root(anchor: Path) -> Path:
+    """The ``<home>/node`` tree root a node *anchor* belongs to (the parent that
+    holds node + npm/npx + node_modules/npm). POSIX anchors live in ``node/bin``;
+    Windows anchors in ``node`` directly."""
+    d = anchor.parent
+    return d.parent if d.name == "bin" else d
+
+
+def _managed_node_marked(anchor: Path | None) -> bool:
+    """Return True when *anchor* carries a current marker binding the WHOLE node
+    tree (node exe bytes + npm/npx wrappers + npm CLI JS/tree).
+
+    The complete tree is rehashed on EVERY call — no (size, mtime) cache — so a
+    same-size, mtime-restored in-place edit of any file (node binary, npm/npx
+    wrapper, or an npm library ``.js``) is still detected and rejected."""
+    if anchor is None:
+        return False
+    try:
+        from hermes_cli.supply_chain.managed import tool_marker_ok
+
+        return tool_marker_ok(
+            anchor,
+            tree_dir=_managed_node_tree_root(anchor),
+            component=_MANAGED_NODE_COMPONENT,
+        )
+    except Exception:
+        return False
+
+
+def hermes_managed_node_tree_trusted(home: Path | None = None) -> bool:
+    """Return True when a Hermes-managed Node tree carries a current marker."""
+    for directory in iter_hermes_node_dirs(home):
+        if _managed_node_marked(_managed_node_anchor(directory)):
+            return True
+    return False
+
+
+def _node_archive_version(anchor: Path) -> str:
+    """Best-effort node version string for the marker (never raises)."""
+    import subprocess
+
+    try:
+        from hermes_cli._subprocess_compat import windows_hide_flags
+
+        result = subprocess.run(
+            [str(anchor), "--version"],
+            capture_output=True,
+            timeout=10,
+            creationflags=windows_hide_flags(),
+        )
+        return result.stdout.decode().strip() or ""
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return ""
+
+
+def _write_managed_node_marker(
+    home: Path | None = None,
+    *,
+    archive_digest: str | None = None,
+    provenance: str = "operator_compat_opt_in",
+) -> bool:
+    """Write a WHOLE-TREE provenance marker for the freshly-placed managed Node
+    tree — binds the node exe bytes AND a deterministic digest over the entire
+    ``<home>/node`` tree (node + npm/npx wrappers + npm CLI JS). ``archive_digest``
+    is accepted for call-site compatibility; the tree digest supersedes it as the
+    verified authority.
+
+    Called after a verified heal/bootstrap. A failed marker write returns False;
+    callers must not execute an unmarked managed tree.
+    """
+    home = home or get_hermes_home()
+    seen: set[str] = set()
+    for directory in iter_hermes_node_dirs(home):
+        anchor = _managed_node_anchor(directory)
+        if anchor is None:
+            continue
+        tree_root = _managed_node_tree_root(anchor)
+        key = str(tree_root)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            from hermes_cli.supply_chain.managed import write_tool_marker
+
+            write_tool_marker(
+                anchor,
+                tree_dir=tree_root,
+                component=_MANAGED_NODE_COMPONENT,
+                # Never execute an unmarked Node merely to populate metadata.
+                version="managed",
+                provenance=provenance,
+            )
+        except Exception:
+            return False
+        return _managed_node_marked(anchor)
+    return False
+
+
 def _path_under_any(path: str, roots: list[str]) -> bool:
     """Return True when *path* sits inside one of *roots* (same drive).
 
@@ -496,6 +627,65 @@ def _print_managed_node_in_use_notice() -> None:
     )
 
 
+_MANAGED_NODE_GUIDANCE = (
+    "Hermes-managed Node.js is not release-verified and its automatic download "
+    "is disabled by default. Install a supported Node.js with your OS/version "
+    "manager (nvm, fnm, apt, brew, winget) so Hermes can use it, or explicitly "
+    "allow it in config: security.supply_chain.allow_unverified_components: "
+    "[\"node\"]. See docs/security/supply-chain-migration.md."
+)
+
+_managed_node_fail_closed_notice_printed = False
+
+
+def _managed_node_download_allowed() -> bool:
+    """Return True only when the mutable Node download may run.
+
+    Secure by default: the nodejs.org download is permitted solely under an
+    explicit operator compatibility opt-in. Any error resolving the posture
+    fails closed (download disallowed).
+    """
+    try:
+        from hermes_cli.supply_chain.gate import compat_opt_in
+
+        return compat_opt_in("node")
+    except Exception:
+        return False
+
+
+def _print_managed_node_fail_closed_notice() -> None:
+    global _managed_node_fail_closed_notice_printed
+    if _managed_node_fail_closed_notice_printed:
+        return
+    _managed_node_fail_closed_notice_printed = True
+    print(f"→ {_MANAGED_NODE_GUIDANCE}", flush=True)
+
+
+def _expected_node_archive_digest(platform_name: str, node_arch: str) -> str | None:
+    """Return the release-manifest-pinned Node archive sha256, or ``None``.
+
+    When the committed supply-chain manifest pins an exact digest for this
+    platform/architecture, the managed-Node heal/bootstrap paths verify the
+    download against it before extraction. When no digest is pinned (the
+    current state — the manifest records Node as transport-trusted pending an
+    exact version+digest), this returns ``None`` and the caller proceeds with a
+    labelled compatibility download. It never fabricates a digest and never
+    skips a digest that IS present.
+    """
+    try:
+        from hermes_cli.supply_chain import get_verifier, normalize_arch
+
+        arch = normalize_arch(node_arch)
+        if arch is None:
+            return None
+        plan = get_verifier().plan("node", platform=platform_name, arch=arch)
+        if plan.artifact is not None and plan.artifact.digest.present:
+            return plan.artifact.digest.value
+    except Exception:
+        return None
+    return None
+
+
 def _heal_managed_node_windows(home: Path | None = None) -> bool | None:
     """Redownload the portable Node zip into ``%HERMES_HOME%\\node`` on Windows.
 
@@ -522,6 +712,13 @@ def _heal_managed_node_windows(home: Path | None = None) -> bool | None:
     import uuid
     import zipfile
 
+    from hermes_cli.supply_chain.errors import VerificationError
+    from hermes_cli.supply_chain.publish import (
+        compute_sha256,
+        iter_zip_members,
+        validate_archive_members,
+    )
+
     arch = (os.environ.get("PROCESSOR_ARCHITEW6432") or os.environ.get("PROCESSOR_ARCHITECTURE", "")).lower()
     if arch in ("amd64", "x86_64"):
         node_arch = "x64"
@@ -542,6 +739,12 @@ def _heal_managed_node_windows(home: Path | None = None) -> bool | None:
     if managed_node_tree_in_use(home):
         _print_managed_node_in_use_notice()
         return None
+
+    # Supply-chain gate (WP4): the mutable nodejs.org download is disabled by
+    # default. It runs only under an explicit operator compatibility opt-in.
+    if not _managed_node_download_allowed():
+        _print_managed_node_fail_closed_notice()
+        return False
 
     # Best-effort sweep of staging/backup litter from interrupted runs; a
     # locked file simply stays for the next attempt.  Only dirs older than
@@ -591,9 +794,22 @@ def _heal_managed_node_windows(home: Path | None = None) -> bool | None:
             tmp_path = Path(tmp_dir)
             zip_path = tmp_path / zip_name
             zip_path.write_bytes(zip_bytes)
+            # Supply-chain gate (WP4): when the release manifest pins an exact
+            # digest for this Node archive, verify it before extraction and
+            # refuse to extract on mismatch. When no digest is pinned (current
+            # state), this is a labelled transport-trusted download — but the
+            # archive members are still validated so a malicious archive cannot
+            # traverse, symlink out, or drop special files.
+            expected_digest = _expected_node_archive_digest("windows", node_arch)
+            if expected_digest is not None and compute_sha256(zip_path) != expected_digest:
+                return False
             extract_dir = tmp_path / "extract"
             extract_dir.mkdir()
             with zipfile.ZipFile(zip_path) as archive:
+                try:
+                    validate_archive_members(iter_zip_members(archive), allow_symlinks=False)
+                except VerificationError:
+                    return False
                 archive.extractall(extract_dir)
             extracted = next(extract_dir.glob("node-v*"), None)
             if extracted is None or not extracted.is_dir():
@@ -601,8 +817,14 @@ def _heal_managed_node_windows(home: Path | None = None) -> bool | None:
             # Move the fully-extracted tree to a sibling staging dir so the
             # swap below is a same-volume rename.
             shutil.move(str(extracted), str(staged))
-    except OSError:
+    except (OSError, zipfile.BadZipFile):
         return False
+
+    # The expected executables must be present before we swap the tree in.
+    if not (staged / "node.exe").exists() or not (staged / "npm.cmd").exists():
+        shutil.rmtree(staged, ignore_errors=True)
+        return False
+
 
     if target.exists():
         try:
@@ -633,9 +855,6 @@ def _heal_managed_node_windows(home: Path | None = None) -> bool | None:
                 pass
             shutil.rmtree(staged, ignore_errors=True)
             return False
-        # The old tree is no longer canonical; locked files may keep it on
-        # disk until the next heal attempt, which is safe.
-        shutil.rmtree(backup, ignore_errors=True)
     else:
         try:
             os.replace(str(staged), str(target))
@@ -643,7 +862,36 @@ def _heal_managed_node_windows(home: Path | None = None) -> bool | None:
             shutil.rmtree(staged, ignore_errors=True)
             return False
 
-    return node_tool_runnable(str(target / "node.exe"))
+    # Mark and verify the complete managed tree BEFORE its first execution.
+    # Keep the prior tree parked until both provenance and the first runtime
+    # probe succeed so either failure can roll back without leaving untrusted
+    # bytes canonical.
+    try:
+        import hashlib
+
+        arch_digest = hashlib.sha256(zip_bytes).hexdigest()
+    except Exception:
+        arch_digest = None
+    provenance = (
+        "release_verified:sha256" if expected_digest is not None else "operator_compat_opt_in"
+    )
+    ok = _write_managed_node_marker(
+        home, archive_digest=arch_digest, provenance=provenance
+    )
+    if ok:
+        ok = node_tool_runnable(str(target / "node.exe"))
+    if not ok:
+        shutil.rmtree(target, ignore_errors=True)
+        if backup.exists():
+            try:
+                os.replace(str(backup), str(target))
+            except OSError:
+                pass
+        return False
+
+    # Provenance and runtime checks passed; the old tree is no longer needed.
+    shutil.rmtree(backup, ignore_errors=True)
+    return True
 
 
 def _bootstrap_managed_node_posix() -> bool:
@@ -658,6 +906,11 @@ def _bootstrap_managed_node_posix() -> bool:
     if not _NODE_BOOTSTRAP_SCRIPT.is_file():
         return False
 
+    # Supply-chain gate (WP4): mutable nodejs.org download disabled by default.
+    if not _managed_node_download_allowed():
+        _print_managed_node_fail_closed_notice()
+        return False
+
     import subprocess
 
     try:
@@ -670,6 +923,10 @@ def _bootstrap_managed_node_posix() -> bool:
             env={
                 **os.environ,
                 "HERMES_HOME": str(get_hermes_home()),
+                # Internal bridge (set AFTER the config-based gate above): tells
+                # node-bootstrap.sh the compatibility download was authorized.
+                # Not a user interface.
+                "_HERMES_SC_BOOTSTRAP_OVERRIDE": "1",
                 # Private provisioning: do not symlink node/npm/npx into
                 # ~/.local/bin — the user has their own toolchain on PATH and
                 # this tree must not shadow it.
@@ -705,10 +962,18 @@ def bootstrap_hermes_managed_node() -> str | None:
         ok = _heal_managed_node_windows()
     else:
         ok = _bootstrap_managed_node_posix()
+        if ok:
+            # A6: the Windows heal marks its own tree (it holds the archive
+            # digest); the POSIX bootstrap shells out to node-bootstrap.sh, so
+            # mark the placed tree here (executable digest; archive digest not
+            # surfaced by the shell path).
+            ok = _write_managed_node_marker()
     if not ok:
         return None
 
     for directory in iter_hermes_node_dirs():
+        if not _managed_node_marked(_managed_node_anchor(directory)):
+            continue
         for name in _candidate_node_command_names("npm"):
             candidate = directory / name
             if candidate.is_file() and (
@@ -750,6 +1015,11 @@ def heal_hermes_managed_node() -> bool:
     if not _NODE_BOOTSTRAP_SCRIPT.is_file():
         return False
 
+    # Supply-chain gate (WP4): mutable nodejs.org download disabled by default.
+    if not _managed_node_download_allowed():
+        _print_managed_node_fail_closed_notice()
+        return False
+
     import subprocess
 
     try:
@@ -759,14 +1029,22 @@ def heal_hermes_managed_node() -> bool:
                 "-c",
                 f'source "{_NODE_BOOTSTRAP_SCRIPT}" && heal_managed_node',
             ],
-            env={**os.environ, "HERMES_HOME": str(get_hermes_home())},
+            env={
+                **os.environ,
+                "HERMES_HOME": str(get_hermes_home()),
+                "_HERMES_SC_BOOTSTRAP_OVERRIDE": "1",
+            },
             capture_output=True,
             timeout=300,
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return False
-    return result.returncode == 0
+    healed = result.returncode == 0
+    if healed:
+        # A6: mark the healed POSIX tree so it is trusted for execution.
+        healed = _write_managed_node_marker()
+    return healed
 
 
 def _managed_node_tree_outdated(home: Path | None = None) -> bool:
@@ -782,6 +1060,9 @@ def _managed_node_tree_outdated(home: Path | None = None) -> bool:
     import subprocess
 
     for directory in iter_hermes_node_dirs(home):
+        # A1/A6: never execute an unmarked/tampered tree for the version probe.
+        if not _managed_node_marked(_managed_node_anchor(directory)):
+            continue
         for name in _candidate_node_command_names("node"):
             candidate = directory / name
             if not candidate.is_file() or (
@@ -812,31 +1093,53 @@ def find_hermes_node_executable(command: str) -> str | None:
     major, upgrading existing users on next launch rather than next reinstall.
     When the heal fails (offline, download error), an outdated-but-runnable
     tree is still returned: old Node beats no Node.
+
+    A6: a managed tree is executed only when it carries a current provenance
+    marker (:func:`_managed_node_marked`). An unmarked legacy tree or a
+    tampered one is NOT returned — the heal is attempted (which re-marks a
+    verified tree), and absent a trusted tree this returns ``None`` so the
+    caller falls back to an operator-PATH Node used in place.
     """
     names = _candidate_node_command_names(command)
 
-    def _first_runnable() -> tuple[str | None, bool]:
-        broken = False
+    def _first_runnable_marked() -> tuple[str | None, Path | None, bool]:
+        """Find a runnable node ONLY inside a marker-verified managed tree.
+
+        A1/A6: the provenance marker is verified BEFORE the binary is executed
+        (``node_tool_runnable`` runs ``node --version``), so an unmarked or
+        tampered tree is never executed — not even for the version probe.
+        Returns ``(resolved, directory, saw_present)`` where ``saw_present`` is
+        True when a managed node shim exists on disk at all (marked or not), so
+        the caller can still trigger a heal that re-downloads + re-marks it.
+        """
+        saw_present = False
         for directory in iter_hermes_node_dirs():
+            marked = _managed_node_marked(_managed_node_anchor(directory))
             for name in names:
                 candidate = directory / name
                 if candidate.is_file() and (
                     sys.platform == "win32" or os.access(candidate, os.X_OK)
                 ):
-                    resolved = str(candidate)
-                    if node_tool_runnable(resolved):
-                        return resolved, broken
-                    broken = True
-        return None, broken
+                    saw_present = True
+                    if not marked:
+                        break  # unmarked/tampered tree: skip WITHOUT executing
+                    if node_tool_runnable(str(candidate)):
+                        return str(candidate), directory, saw_present
+                    # marked but this shim won't run -> broken; try next name/dir
+        return None, None, saw_present
 
-    resolved, broken_present = _first_runnable()
-    needs_heal = broken_present or (
+    # ``resolved`` is ALWAYS marker-verified + runnable (or None) — never an
+    # unmarked binary that has been executed.
+    resolved, _directory, present = _first_runnable_marked()
+    needs_heal = (present and resolved is None) or (
         resolved is not None and _managed_node_tree_outdated()
     )
     if needs_heal and heal_hermes_managed_node():
-        healed, _ = _first_runnable()
+        healed, _healed_dir, _ = _first_runnable_marked()
         if healed:
             return healed
+    # An outdated-but-marked tree is still returned when the heal fails (old
+    # Node beats no Node); an unmarked/tampered tree is never returned.
     return resolved
 
 
@@ -872,16 +1175,43 @@ def find_node_executable(command: str) -> str | None:
     """Resolve a Node.js command, preferring healthy Hermes-managed installs.
 
     This is for Hermes-owned subprocesses that should not be broken by a bad,
-    missing, or elevation-triggering system Node/npm on PATH. When a managed
-    tree exists but cannot be healed, returns ``None`` instead of falling back
-    to system npm on PATH.
+    missing, or elevation-triggering system Node/npm on PATH. When a *trusted*
+    managed tree exists but cannot be healed, returns ``None`` instead of
+    falling back to system npm on PATH.
+
+    A6: only a marker-*trusted* managed tree fails closed this way. An unmarked
+    legacy tree (or a tampered one) is NOT trusted and is treated as absent, so
+    the caller falls back to an operator-PATH Node used in place rather than
+    executing an unverified managed binary.
     """
     managed = find_hermes_node_executable(command)
     if managed:
         return managed
-    if hermes_managed_node_tree_present():
+    if hermes_managed_node_tree_present() and hermes_managed_node_tree_trusted():
         return None
-    return find_node_executable_on_path(command)
+    return _accept_operator_node(find_node_executable_on_path(command))
+
+
+def _accept_operator_node(operator_path: str | None) -> str | None:
+    """A6 alias-bypass: an operator-PATH Node result that resolves (realpath,
+    case-insensitive) into a Hermes-managed node root is the managed binary
+    reached via PATH/symlink/junction/case alias — accept it only when the
+    tree's provenance marker verifies; otherwise reject.
+
+    A1 (final): if the alias/marker check cannot be performed (import or verify
+    error), FAIL CLOSED — return None, never the operator path. Trusting an
+    unverifiable operator path would let a managed alias execute unchecked."""
+    if not operator_path:
+        return None
+    try:
+        from hermes_cli.supply_chain.managed import accept_operator_path
+
+        def _verify(real: str) -> bool:
+            return _managed_node_marked(_managed_node_anchor(Path(real).parent))
+
+        return accept_operator_path(operator_path, component="node", verify=_verify)
+    except Exception:
+        return None
 
 
 def with_hermes_node_path(env: dict[str, str] | None = None) -> dict[str, str]:

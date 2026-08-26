@@ -37,8 +37,13 @@ export default function Welcome() {
         </p>
 
         <p className="m-0 text-center text-base leading-normal tracking-tight text-muted-foreground">
-          The agent that grows with you. We&rsquo;ll set things up in the
-          background &mdash; takes a few minutes.
+          The agent that grows with you. Install{' '}
+          <span className="font-mono">uv</span> first (Windows:{' '}
+          <span className="font-mono">winget install astral-sh.uv</span> &mdash;
+          macOS/Linux: <span className="font-mono">brew install uv</span>), then
+          we&rsquo;ll set up the rest in the background &mdash; takes a few
+          minutes. The installer uses your <span className="font-mono">uv</span>{' '}
+          and won&rsquo;t download it for you.
         </p>
       </div>
 

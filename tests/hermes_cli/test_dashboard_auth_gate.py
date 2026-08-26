@@ -92,6 +92,13 @@ def _stub_uvicorn_run(monkeypatch):
     import contextlib
     import uvicorn
     captured: dict = {"kwargs": {}}
+    # WP1 (SEC-AUDIT-001): a loopback SPA bind fails closed on a
+    # NON-interactive launch. These gate tests exercise auth_required/proxy
+    # behavior, not the terminal-bootstrap gate, and a built ``web_dist`` may
+    # or may not be present, so pin an interactive terminal to keep them
+    # deterministic. The non-interactive fail-closed path is covered in
+    # test_dashboard_local_browser_auth.py.
+    monkeypatch.setattr(web_server, "_stdout_is_interactive", lambda: True)
 
     class _FakeConfig:
         loaded = True

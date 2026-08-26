@@ -2544,6 +2544,31 @@ DEFAULT_CONFIG = {
         # for restricted networks, audited environments, or air-gapped
         # systems where any runtime install is unacceptable.
         "allow_lazy_installs": True,
+        # Supply-chain verification posture (Work Package 4). SECURE BY DEFAULT.
+        # When enforce is true (the default), Hermes-managed
+        # bootstrap/installer/repair/update paths that cannot chain a download
+        # to the committed release manifest (an exact digest, or an independent
+        # provenance identity) do NOT run the mutable installer: they prefer an
+        # existing operator-managed executable and otherwise fail closed with
+        # actionable guidance (no network, no execution, no extraction).
+        #
+        # Compatibility opt-in is SCOPED so allowing one legacy/external manager
+        # never reactivates unrelated auto-downloads:
+        #   * allow_unverified_components: ["uv", "node", ...] — per-component
+        #     allow-list (component ids: uv, node, npm, cua-driver, tirith,
+        #     lazy-deps, mcp-bootstrap, browser-use, profile-distribution,
+        #     hermes-source-zip, portablegit, bws, iron-proxy, camofox,
+        #     agent-browser, playwright, managed-python, ...; "*" allows all).
+        #   * enforce: false — broad opt-out (discouraged).
+        # These run the labelled transport-trusted installer and never write a
+        # release-verified marker. Pre-config shell/PowerShell installers use the
+        # --allow-unverified-bootstrap CLI flag (no environment-variable UI). See
+        # docs/security/supply-chain-trust-root.md and
+        # docs/security/supply-chain-migration.md.
+        "supply_chain": {
+            "enforce": True,
+            "allow_unverified_components": [],
+        },
     },
 
     "cron": {
@@ -3411,11 +3436,28 @@ DEFAULT_CONFIG = {
         "wait_timeout": 5.0,
 
         # How to handle missing server binaries.
-        # ``"auto"`` — try to install via npm/go/pip into
-        #              ``<HERMES_HOME>/lsp/bin/`` on first use.
-        # ``"manual"`` — only use binaries already on PATH.
+        # ``"auto"`` — install the pinned, reviewed, immutable LSP bundle
+        #              (committed lock graph + integrity) into
+        #              ``<HERMES_HOME>/lsp/`` on first use, using a
+        #              purpose-specific scrubbed environment.  Effective ONLY
+        #              after affirmative, versioned consent recorded via
+        #              ``hermes lsp enable-auto-install`` (see
+        #              ``auto_install_consent_version`` below).
+        # ``"manual"`` — only use binaries already on PATH; never install.
         # ``"off"`` — alias for ``manual``.
-        "install_strategy": "auto",
+        #
+        # SECURITY (SEC-AUDIT-002): the effective default is ``manual``.  A
+        # bare ``auto`` value without a matching consent version is treated as
+        # implicit default materialisation, not operator consent, and is
+        # downgraded to ``manual``.
+        "install_strategy": "manual",
+
+        # Affirmative consent marker for LSP auto-installation.  ``auto`` is
+        # honoured only when this equals the current consent policy version
+        # (see ``agent.lsp.consent.CONSENT_POLICY_VERSION``).  Owned by
+        # ``hermes lsp enable-auto-install`` / ``hermes lsp setup`` — do not
+        # edit by hand.  ``null`` means no consent has been recorded.
+        "auto_install_consent_version": None,
 
         # Idle language servers are shut down automatically after this
         # many seconds with no file activity, then respawned on demand.
@@ -3765,7 +3807,7 @@ DEFAULT_CONFIG = {
     },
 
     # Config schema version - bump this when adding new required fields
-    "_config_version": 38,
+    "_config_version": 39,
 }
 
 # Optional environment variables that enhance functionality

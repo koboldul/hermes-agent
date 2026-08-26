@@ -298,7 +298,11 @@ in
 
     rm -rf node_modules/
     ${lib.getExe' nodejs "npm"} cache clean --force
-    CI=true ${lib.getExe' nodejs "npm"} install --workspaces
+    # A4 audited lifecycle: regenerate the lockfile without running any package
+    # lifecycle scripts (--ignore-scripts). The authoritative, hermetic builds
+    # are the `nix build` invocations below (importNpmLock, content-addressed),
+    # so no native install/postinstall hook needs to run during lockfile regen.
+    CI=true ${lib.getExe' nodejs "npm"} install --workspaces --ignore-scripts
     ${lib.getExe npm-lockfile-fix} ./package-lock.json
 
     # importNpmLock reads hashes from the lockfile itself — rebuild every
@@ -344,7 +348,14 @@ in
       LOCK_STAMP_VALUE=$(sha256sum "$REPO_ROOT/package-lock.json" 2>/dev/null | awk '{print $1}')
       if [ ! -f "$LOCK_STAMP" ] || [ "$(cat "$LOCK_STAMP")" != "$LOCK_STAMP_VALUE" ]; then
         echo "npm: package-lock.json changed, running npm ci..."
-        ( cd "$REPO_ROOT" && CI=true ${lib.getExe' nodejs "npm"} ci --silent --no-fund --no-audit 2>/dev/null )
+        # A4 audited lifecycle: install WITHOUT running package lifecycle scripts
+        # (--ignore-scripts is version-independent; npm 10 ignores allowScripts),
+        # then run ONLY the reviewed, allowlisted lifecycle scripts (node-pty
+        # prebuild, esbuild, ...) via the audited orchestrator. get-windows is on
+        # the deny-list and never rebuilt.
+        ( cd "$REPO_ROOT" \
+          && CI=true ${lib.getExe' nodejs "npm"} ci --silent --no-fund --no-audit --ignore-scripts 2>/dev/null \
+          && ${lib.getExe' nodejs "node"} apps/desktop/scripts/run-allowed-lifecycle.mjs 2>/dev/null )
         mkdir -p "$STAMP_DIR"
         echo "$LOCK_STAMP_VALUE" > "$LOCK_STAMP"
       fi

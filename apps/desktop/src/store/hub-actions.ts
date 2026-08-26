@@ -1,9 +1,12 @@
 import { atom, map } from 'nanostores'
 
 import {
+  activateSkillFromHub,
   getActionStatus,
   installSkillFromHub,
   type ProfileScope,
+  proposeSkillFromHub,
+  type SkillHubProposal,
   uninstallSkillFromHub,
   updateSkillsFromHub
 } from '@/hermes'
@@ -156,6 +159,27 @@ async function runHubAction(
 
 export function installHubSkill(identifier: string, profile?: ProfileScope): Promise<void> {
   return runHubAction(identifier, 'install', () => installSkillFromHub(identifier, profile), profile)
+}
+
+// A4 (Skills XPIA) two-step install. `proposeHubSkill` quarantines the skill on
+// the server and returns its transport-resolved commit + whole-bundle digest;
+// the trusted parent UI shows those and, on explicit confirm, calls
+// `activateHubSkill` which echoes the EXACT commit+digest back for server-side
+// re-verification before install. A hub message can never install on its own.
+export function proposeHubSkill(identifier: string, profile?: ProfileScope): Promise<SkillHubProposal> {
+  return proposeSkillFromHub(identifier, profile)
+}
+
+export async function activateHubSkill(proposal: SkillHubProposal, profile?: ProfileScope): Promise<void> {
+  await activateSkillFromHub(proposal.proposal_id, proposal.commit, proposal.digest, profile)
+
+  // Install completed synchronously server-side — reflect it immediately, then
+  // reconcile the hub sources + Capabilities skills list + slash catalog (same
+  // invalidations the background install path runs on a clean exit).
+  $hubInstalledOverride.setKey(proposal.identifier, true)
+  void queryClient.invalidateQueries({ queryKey: HUB_SOURCES_KEY })
+  void queryClient.invalidateQueries({ queryKey: SKILLS_LIST_KEY })
+  invalidateSlashCompletions()
 }
 
 export function uninstallHubSkill(identifier: string, name: string, profile?: ProfileScope): Promise<void> {

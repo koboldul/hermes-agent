@@ -202,6 +202,12 @@ authorization model, but the rules below apply uniformly.
    authorization means relying on OS-level access control (file
    permissions, loopback-only binds) and not exposing the surface
    beyond the local user without an explicit network auth layer.
+   A browser dashboard is different from local IPC: a loopback TCP bind
+   restricts traffic to the host but does not identify one OS user. Until a
+   release provides authenticated loopback browser sessions, treat the
+   loopback browser dashboard as single-user-only. On a shared host, put it
+   behind an authenticated reverse proxy with `dashboard.public_url` set, or
+   do not mount the browser SPA.
 2. **An allowlist is required for every enabled network-exposed
    adapter.** Adapters must refuse to dispatch agent work, resolve
    approvals, or relay output until an allowlist is set. Code paths
@@ -215,11 +221,13 @@ authorization model, but the rules below apply uniformly.
    Hermes Agent does not model per-caller capabilities inside a
    single adapter. Operators who need capability separation should
    run separate agent instances with separate allowlists.
-5. **Binding a local-only surface to a non-loopback interface is a
-   break-glass operator decision (§3.2).** The dashboard and other
-   plugin HTTP servers default to loopback; exposing them via
-   `--host 0.0.0.0` or equivalent makes public-exposure hardening
-   (§4) the operator's responsibility.
+5. **Binding a local-only surface to a non-loopback interface changes the
+   authorization boundary.** The dashboard and other plugin HTTP servers
+   default to loopback. A non-loopback dashboard bind must engage its
+   authentication gate and fail closed when no provider is configured;
+   firewalls, VPNs, TLS, and provider choice remain the operator's
+   responsibility. `--insecure` is retained only for compatibility and does
+   not disable dashboard authentication.
 
 ---
 
@@ -274,12 +282,13 @@ private-disclosure channel and don't receive advisories.
   isolation that only sandboxes shell; reports whose preconditions
   require pre-existing write access to operator-owned configuration
   or credential files (those are already inside the trust envelope).
-- **Documented break-glass settings.** Operator-selected trade-offs
-  that explicitly disable protections: `--insecure` and equivalent
-  flags on the dashboard or other components, disabled approvals,
-  local backend in production, development profiles that bypass
-  hermes-home security, and similar. Reports against those
-  configurations are not vulnerabilities — that's the flag's job.
+- **Documented break-glass settings.** Operator-selected trade-offs that
+  explicitly disable protections, such as disabled approvals, a local terminal
+  backend used for untrusted content, development profiles that bypass
+  hermes-home security, and similar. Reports whose effect is exactly the
+  documented trade-off are not vulnerabilities. The dashboard's legacy
+  `--insecure` flag is not such a setting: it is a compatibility no-op and does
+  not disable authentication.
 - **Community-contributed skills and plugins.** Third-party skills
   (including the community skills repository) and third-party
   plugins are in the operator's review surface, not Hermes Agent's
@@ -315,6 +324,19 @@ that:
   network policy layer to restrict egress.
 - Configure a caller allowlist for every network-exposed adapter
   you enable (§2.6).
+- On a shared host, do not use the unauthenticated loopback browser dashboard.
+  Loopback is host-local, not user-authenticated. Use an authenticated reverse
+  proxy with `dashboard.public_url` configured until authenticated loopback
+  browser sessions ship.
+- Set `lsp.install_strategy: manual` for credential-bearing or hardened
+  deployments until LSP installers and servers use a purpose-specific
+  environment allowlist and immutable dependency graphs.
+- Desktop currently resolves some unlabelled link titles/favicons
+  automatically and loads supported social-provider scripts in the privileged
+  renderer. Avoid untrusted bare links and interactive social embeds, or
+  restrict Desktop egress, until the fixed release is installed.
+- Set `security.allow_lazy_installs: false` where runtime package installation
+  is not acceptable.
 - Review third-party skills and plugins before install (§2.4,
   §2.5). For skills, this means reading the Python and scripts,
   not just SKILL.md. Skills Guard reports and the install audit
@@ -322,6 +344,11 @@ that:
 - Hermes Agent includes supply-chain guards for MCP server
   launches and for dependency / bundled-package changes in CI; see
   `CONTRIBUTING.md` for specifics.
+- For bootstrap runtimes, a checksum or public key obtained only from the same
+  mutable channel as the artifact is not independent verification. Prefer an
+  operator-selected package manager with its own signing root or a Hermes
+  release flow whose signer fingerprint was verified through an independent
+  channel.
 
 ---
 

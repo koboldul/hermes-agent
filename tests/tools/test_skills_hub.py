@@ -31,6 +31,21 @@ from tools.skills_hub import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _skills_hub_gate_opt_in(monkeypatch):
+    """WP4 gates official / live-main skill *activation* in
+    ``install_from_quarantine`` behind the supply-chain posture. These tests
+    exercise the install/update/path-safety MECHANICS on mutable/community
+    bundles, so opt in; the fail-closed activation gate is proved in
+    tests/supply_chain/test_extension_gates.py.
+    """
+    monkeypatch.setattr(
+        "hermes_cli.supply_chain.gate._sc_config",
+        lambda: {"enforce": True, "allow_unverified_components": ["*"]},
+        raising=False,
+    )
+
+
 # ---------------------------------------------------------------------------
 # GitHubSource._parse_frontmatter_quick
 # ---------------------------------------------------------------------------
@@ -427,9 +442,13 @@ class TestCheckForSkillUpdates:
         )
         skill_dir = tmp_path / "demo-skill"
         skill_dir.mkdir()
-        (skill_dir / "SKILL.md").write_text("same content")
+        # newline="" writes the content byte-for-byte (no "\n"→"\r\n" on
+        # Windows), so the on-disk bytes match the in-memory bundle exactly —
+        # the byte-symmetry contract content_hash()/bundle_content_hash() assert.
+        (skill_dir / "SKILL.md").write_text("same content", newline="")
         (skill_dir / "references").mkdir()
-        (skill_dir / "references" / "checklist.md").write_text("- [ ] security\n")
+        (skill_dir / "references" / "checklist.md").write_text(
+            "- [ ] security\n", newline="")
 
         assert bundle_content_hash(bundle) == content_hash(skill_dir)
 
@@ -763,7 +782,7 @@ class TestOptionalSkillSourceBinaryAssets:
             wav_bytes
         )
         (skill_dir / "assets" / "neutts-cli" / "samples" / "jo.txt").write_text(
-            "hello\n", encoding="utf-8"
+            "hello\n", encoding="utf-8", newline=""
         )
         pycache_dir = skill_dir / "assets" / "neutts-cli" / "src" / "neutts_cli" / "__pycache__"
         pycache_dir.mkdir(parents=True)

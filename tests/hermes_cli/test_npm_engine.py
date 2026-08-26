@@ -8,8 +8,17 @@ npm it owns, and every other case leaves the original failure alone.
 import json
 import subprocess
 from pathlib import Path
-
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _opt_in_unverified(monkeypatch):
+    # npm upgrade is now the explicit transport-trusted compatibility path (the
+    # secure default disables it). Opt in (config gate) so the upgrade mechanics run.
+    monkeypatch.setattr(
+        "hermes_cli.supply_chain.gate._sc_config", lambda: {"enforce": True, "allow_unverified_components": ["*"]}
+    )
+
 
 import hermes_cli.npm_engine as npm_engine
 from hermes_cli.npm_engine import (

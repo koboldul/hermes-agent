@@ -2,7 +2,7 @@
 # corruption bug. Build a pinned shared library for the runtime image instead
 # of relying on a distro backport that trixie does not currently provide.
 # See #70480 and https://sqlite.org/wal.html#walresetbug.
-FROM debian:13.4 AS sqlite_build
+FROM debian:13.4@sha256:e2d08da6f42ef4b09b165d55528a12727aeed8240dc9edf888e3ec07e10ef9da AS sqlite_build
 ARG SQLITE_AUTOCONF_VERSION=3530400
 ARG SQLITE_SHA256=0e9483900e92cd5de8fd48d16bf9200145a61f7fd5be542a5ac81d8a9516eb9c
 RUN apt-get -o Acquire::Retries=3 update && \
@@ -49,7 +49,7 @@ FROM ghcr.io/astral-sh/uv:0.11.6-python3.13-trixie@sha256:b3c543b6c4f23a5f2df228
 # 2.41) runtime.  Bumping to a new Node major is a one-line ARG change; see
 # #4977.
 FROM node:26-bookworm-slim@sha256:9e6f9357d371591e32ab6f2d8a26d63bdd0d17c29eee3f4f3e7e454d9634bf73 AS node_source
-FROM debian:13.4
+FROM debian:13.4@sha256:e2d08da6f42ef4b09b165d55528a12727aeed8240dc9edf888e3ec07e10ef9da AS runtime_apt
 
 # Disable Python stdout buffering to ensure logs are printed immediately.
 # Do not write .pyc files at runtime: /opt/hermes is immutable in the
@@ -72,6 +72,8 @@ RUN apt-get -o Acquire::Retries=3 update && \
     apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
     ca-certificates curl iputils-ping python3 python-is-python3 ripgrep ffmpeg gcc g++ make cmake python3-dev python3-venv libffi-dev libolm-dev libatomic1 procps git openssh-client docker-cli xz-utils && \
     rm -rf /var/lib/apt/lists/*
+
+FROM runtime_apt AS runtime
 
 # Prefer the fixed SQLite over Debian's vulnerable libsqlite3.so.0. Keep the
 # public library name stable so both the system interpreter and the uv-created
@@ -183,6 +185,10 @@ COPY ui-tui/packages/hermes-ink/ ui-tui/packages/hermes-ink/
 # apps/shared/ is copied IN FULL because web/package.json references it as a
 # `file:` workspace dependency (same pattern as hermes-ink above).
 COPY apps/shared/ apps/shared/
+# A4: the audited lifecycle orchestrator (runs ONLY the reviewed allowlisted
+# lifecycle scripts after lock identity verification). Copied BEFORE the install
+# so it can be invoked immediately after `npm install --ignore-scripts`.
+COPY apps/desktop/scripts/run-allowed-lifecycle.mjs apps/desktop/scripts/
 
 # `npm_config_install_links=false` forces npm to install `file:` deps as
 # symlinks instead of copies.  This is the default since npm 10+, which is
@@ -196,27 +202,59 @@ COPY apps/shared/ apps/shared/
 # guards against a future regression if the source npm version changes.
 ENV npm_config_install_links=false
 
-RUN npm install --prefer-offline --no-audit --fetch-retries=5 && \
-    for i in 1 2 3; do \
-        npx playwright install --with-deps chromium --only-shell && break || \
-        { [ "$i" = 3 ] && exit 1; echo "playwright install failed (attempt $i); retrying in 10s"; sleep 10; }; \
-    done && \
+# Locked, needed dependency install (always runs; not a browser payload).
+# A4 audited lifecycle: install with `--ignore-scripts` (NO package runs
+# arbitrary install/postinstall code, regardless of npm major -- npm 10 ignores
+# package.json `allowScripts`), then run the orchestrator, which executes ONLY
+# the reviewed allowlisted lifecycle scripts (node-pty prebuild, esbuild, ...)
+# via `npm rebuild <name>` after verifying each against the lockfile. get-windows
+# is on the deny-list and never rebuilt.
+RUN npm install --ignore-scripts --prefer-offline --no-audit --fetch-retries=5 && \
+    node apps/desktop/scripts/run-allowed-lifecycle.mjs && \
     npm cache clean --force
+
+# Supply-chain gate (WP4): the Playwright Chromium download is an UNVERIFIED
+# browser payload with no committed manifest identity/digest. It is therefore a
+# SEPARATE, default-SKIPPED layer:
+#   * Release/publish builds pass NO flag → the browser is NOT baked in. The
+#     image ships clean (no unverified payload); at runtime the agent resolves
+#     a browser through the gated agent-browser path only when the operator
+#     opts in (security.supply_chain.allow_unverified_components: ["lazy-deps"]).
+#   * CI test builds may pass --build-arg ALLOW_UNVERIFIED_BROWSER=1 to bake the
+#     browser for the in-container integration suite. An image built this way is
+#     an explicit CI-test artifact and must NEVER be pushed as a release
+#     (enforced by the release workflow, which passes no such flag).
+# To bake a *verified* browser, pin exact Playwright browser archive
+# URLs+digests in supply-chain/manifest.json and verify before install.
+ARG ALLOW_UNVERIFIED_BROWSER=
+RUN if [ "${ALLOW_UNVERIFIED_BROWSER}" = "1" ]; then \
+        echo "WARNING (supply-chain WP4): baking an UNVERIFIED Playwright browser payload (explicit CI-test compatibility path). Do NOT push an image built this way as a release." >&2; \
+        for i in 1 2 3; do \
+            npx playwright install --with-deps chromium --only-shell && break || \
+            { [ "$i" = 3 ] && exit 1; echo "playwright install failed (attempt $i); retrying in 10s"; sleep 10; }; \
+        done; \
+    else \
+        echo "INFO (supply-chain WP4): skipping the unverified Playwright browser payload (no committed digest). Release images ship WITHOUT a pre-baked browser; the runtime resolves it through the gated path when the operator opts in. See docs/security/supply-chain-migration.md." >&2; \
+    fi
 
 # ---------- Photon iMessage sidecar deps (baked, NS-606) ----------
 # The photon plugin's Node sidecar needs its own node_modules
 # (spectrum-ts). The install tree is immutable at runtime, so a lazy
 # `npm ci` on first connect would hit EROFS — bake the deps here instead
-# (deterministic installs, NS-559). The patch script is copied alongside
-# the manifests because package.json's postinstall runs it, which also
-# means the spectrum-ts patch is applied at build time. Layer-cached:
-# only re-runs when the sidecar manifests/patch change.
+# (deterministic installs, NS-559). A4 audited lifecycle: install with
+# --ignore-scripts (no third-party package runs arbitrary install code), then
+# run ONLY the sidecar's OWN reviewed first-party postinstall (the spectrum-ts
+# patch) explicitly. The sidecar is a standalone package with its own lockfile,
+# so the root allowlist orchestrator does not cover it; running its reviewed
+# first-party patch by hand is the audited equivalent. Layer-cached: only
+# re-runs when the sidecar manifests/patch change.
 COPY plugins/platforms/photon/sidecar/package.json \
      plugins/platforms/photon/sidecar/package-lock.json \
      plugins/platforms/photon/sidecar/patch-spectrum-mixed-attachments.mjs \
      plugins/platforms/photon/sidecar/
 RUN cd plugins/platforms/photon/sidecar && \
-    npm ci --no-audit --fetch-retries=5 && \
+    npm ci --ignore-scripts --no-audit --fetch-retries=5 && \
+    node patch-spectrum-mixed-attachments.mjs && \
     npm cache clean --force
 
 # ---------- Layer-cached Python dependency install ----------

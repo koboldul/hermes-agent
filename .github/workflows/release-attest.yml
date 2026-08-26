@@ -1,0 +1,77 @@
+# Release attestation (Work Package 4 trust anchor).
+#
+# Produces a GitHub Artifact Attestation (Sigstore keyless OIDC, logged in the
+# public Fulcio/Rekor transparency logs) for the reviewed supply-chain manifest
+# on every release tag. The attestation is bound to THIS workflow's OIDC
+# identity — the exact identity pinned in supply-chain/manifest.json
+# (manifest.signer.identity_regexp) and documented in
+# docs/security/supply-chain-trust-root.md.
+#
+# A fresh install that downloads the manifest verifies it with:
+#   gh attestation verify supply-chain/manifest.json \
+#     --repo NousResearch/hermes-agent \
+#     --cert-identity-regexp '^https://github\.com/NousResearch/hermes-agent/\.github/workflows/release-attest\.yml@refs/tags/v' \
+#     --cert-oidc-issuer https://token.actions.githubusercontent.com
+#
+# There is no in-repo signing key: the signing certificate is minted per-run by
+# Fulcio for this workflow's identity and logged in Rekor. Attesting the
+# manifest (not fabricated artifact digests) is deliberate — the manifest is
+# the reviewed source of truth, and its integrity is what a downloaded copy
+# must prove.
+#
+# All actions are SHA-pinned per the repository dependency-pinning policy.
+
+name: Release attestation
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  attest-manifest:
+    name: Attest supply-chain manifest
+    if: github.repository == 'NousResearch/hermes-agent'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      id-token: write        # OIDC: mint the Fulcio signing certificate
+      contents: read
+      attestations: write    # write the attestation to the Rekor-backed store
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Install hash-pinned release-gate dependency
+        run: >-
+          python -m pip install
+          --disable-pip-version-check
+          --only-binary=:all:
+          --require-hashes
+          -r scripts/ci/requirements-release-attest.txt
+
+      # Refuse to attest an incoherent manifest: this is the same gate CI runs
+      # on PRs, so a release can never publish a manifest that fails schema,
+      # host, floor, sequence, expiry, or ledger-coverage checks.
+      - name: Validate manifest, ledger, and mutable-fetch surface
+        run: python scripts/ci/check_supply_chain.py
+
+      # Refuse to attest a release whose publish path could ship or push an
+      # unverified executable payload (WP4 items 1 & 7). Ties the manifest
+      # attestation to a provably-clean release/publish workflow.
+      - name: Validate release-publish path is fail-closed
+        run: python scripts/ci/check_release_publish.py
+
+      - name: Attest the reviewed release manifest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: supply-chain/manifest.json

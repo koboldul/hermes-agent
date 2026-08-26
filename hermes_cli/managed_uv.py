@@ -36,6 +36,7 @@ from typing import Callable, Optional
 
 from hermes_constants import get_hermes_home
 from hermes_cli.sqlite_runtime import SQLiteRuntimeInfo, probe_sqlite_runtime
+from hermes_cli.supply_chain.errors import FailClosed
 
 logger = logging.getLogger(__name__)
 
@@ -63,14 +64,39 @@ def managed_uv_path() -> Path:
     return home / "bin" / "uv"
 
 
-def resolve_uv() -> Optional[str]:
-    """Return the managed uv path if it exists, else ``None``.
+def _managed_uv_path_if_executable() -> Optional[str]:
+    """Raw existence lookup of the managed uv (NO marker check).
 
-    No side effects — pure lookup.
+    Internal only — used to verify a fresh install succeeded BEFORE its
+    provenance marker is written. Callers that resolve a uv to *execute* must
+    use :func:`resolve_uv`, which is marker-verified.
     """
     p = managed_uv_path()
     if p.is_file() and os.access(p, os.X_OK):
         return str(p)
+    return None
+
+
+def resolve_uv() -> Optional[str]:
+    """Return the managed uv path if it exists AND carries a current A6
+    provenance marker, else ``None``.
+
+    No side effects — pure lookup. An unmarked (legacy) or tampered managed uv
+    is treated as absent so every caller (``ensure_uv``, the Termux update
+    bootstrap, lazy-deps, …) falls back to an operator-PATH uv used in place, or
+    a gated re-provision that writes a fresh marker — it is never executed on
+    existence alone.
+    """
+    raw = _managed_uv_path_if_executable()
+    if raw is None:
+        return None
+    try:
+        from hermes_cli.supply_chain.managed import managed_ok
+
+        if managed_ok(raw, component="uv"):
+            return raw
+    except Exception:
+        return None
     return None
 
 
@@ -198,9 +224,29 @@ def _ensure_uv_path(
     repair_observer: Callable[[RuntimeRepairResult], None] | None = None,
 ) -> Optional[str]:
     """Resolve the managed uv path, installing it if necessary (plain ``str``/``None``)."""
+    # A6: a managed uv is trusted only with a current provenance marker whose
+    # digest matches its bytes. An unmarked (legacy) or tampered managed uv is
+    # IGNORED — we prefer a separately-resolved operator uv, or re-install (which
+    # writes a fresh marker).
+    from hermes_cli.supply_chain.managed import managed_ok
+
     existing = resolve_uv()
-    if existing:
+    if existing and managed_ok(existing, component="uv"):
         return existing
+    if existing:
+        logger.info(
+            "managed uv at %s has no current provenance marker; ignoring it "
+            "(A6) and preferring an operator uv or a fresh verified install",
+            existing,
+        )
+
+    # Supply-chain: prefer an existing operator-managed uv over any managed
+    # install. Used in place — not copied into managed storage, not relabelled.
+    operator_uv = _probe_operator_uv()
+    if operator_uv:
+        print(f"  ✓ Using operator-managed uv at {operator_uv}")
+        print("    (not release-verified; used in place, not copied into managed storage)")
+        return operator_uv
 
     target = managed_uv_path()
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -209,14 +255,36 @@ def _ensure_uv_path(
 
     try:
         _install_uv(target)
+    except FailClosed as exc:
+        print("  ✗ uv is unavailable and cannot be release-verified; not installing.")
+        print(f"    {exc.guidance or exc}")
+        return None
     except Exception as exc:
         logger.warning("Managed uv install failed: %s", exc)
         print(f"  ✗ Failed to install managed uv: {exc}")
         return None
 
-    # Verify
-    result = resolve_uv()
+    # Verify the install landed (raw lookup — the marker is written just below,
+    # so a marker-gated resolve_uv() would spuriously report failure here).
+    result = _managed_uv_path_if_executable()
     if result:
+        # A6: record a provenance marker so this managed uv is trusted on the
+        # next resolve. The install ran only via the release-verified PROCEED
+        # path or an explicit operator compatibility opt-in; label accordingly.
+        try:
+            from hermes_cli.supply_chain.managed import write_marker
+
+            version = subprocess.run(
+                [result, "--version"], capture_output=True, text=True,
+                encoding="utf-8", errors="replace", check=False,
+            ).stdout.strip()
+            write_marker(
+                result, component="uv",
+                version=version or "unknown",
+                provenance="operator_compat_opt_in",
+            )
+        except Exception as exc:  # pragma: no cover - marker best-effort
+            logger.warning("could not write uv provenance marker: %s", exc)
         version = subprocess.run(
             [result, "--version"],
             capture_output=True,
@@ -334,7 +402,22 @@ def update_managed_uv(
         # Not installed yet — ensure_uv() will handle that elsewhere.
         return None
 
-    if force or not _uv_self_update_is_fresh():
+    # Supply-chain (WP4): ``uv self update`` fetches and swaps the uv binary
+    # from a mutable network source with no committed digest. Under the secure
+    # default it is skipped — the existing managed uv keeps working (old install
+    # preserved) — unless the operator explicitly opts in
+    # (security.supply_chain.allow_unverified_components: ["uv"]). The
+    # CVE-driven runtime repair probe below is unaffected and always runs.
+    from hermes_cli.supply_chain.gate import compat_opt_in
+
+    _uv_self_update_allowed = compat_opt_in("uv")
+    if not _uv_self_update_allowed:
+        logger.debug(
+            "uv self update skipped: supply-chain enforce (no 'uv' opt-in); "
+            "keeping the existing managed uv (old working install preserved)"
+        )
+
+    if _uv_self_update_allowed and (force or not _uv_self_update_is_fresh()):
         try:
             result = subprocess.run(
                 [existing, "self", "update"],
@@ -534,6 +617,26 @@ def _attempt_install_generation(
     generation = python_root / f"generation-{token}"
     generation.mkdir(parents=True, exist_ok=False)
     _make_world_traversable(generation)
+
+    # Supply-chain gate (WP4): provisioning a managed Python downloads a
+    # python-build-standalone build via uv. uv verifies its own download, but
+    # the exact build IDs/digests are not pinned in the release manifest, so
+    # this is disabled by default. The operator allows it with
+    # security.supply_chain.allow_unverified_components: ["managed-python"].
+    try:
+        from hermes_cli.supply_chain.gate import compat_opt_in
+
+        _py_ok = compat_opt_in("managed-python")
+    except Exception:
+        _py_ok = False
+    if not _py_ok:
+        logger.info(
+            "managed Python provisioning disabled by default (supply-chain "
+            "enforce); allow it with security.supply_chain."
+            "allow_unverified_components: [\"managed-python\"]."
+        )
+        _remove_tree(generation, boundary=python_root)
+        return None
 
     env = managed_python_env(project_root, install_dir=generation)
     install = subprocess.run(
@@ -1312,13 +1415,79 @@ def repair_vulnerable_runtime(
 # ---------------------------------------------------------------------------
 
 
+_UV_GUIDANCE = (
+    "uv is required. Install it with your OS/version manager (e.g. "
+    "'pipx install uv', 'brew install uv', 'winget install astral-sh.uv') and "
+    "Hermes will use it in place, or explicitly allow the unverified installer "
+    "in config: security.supply_chain.allow_unverified_components: [\"uv\"]. "
+    "Pre-config installers accept --allow-unverified-bootstrap. See "
+    "docs/security/supply-chain-migration.md."
+)
+
+
+def _supply_chain_enforce() -> bool:
+    """Return the supply-chain enforce posture (secure by default; see gate)."""
+    from hermes_cli.supply_chain.gate import enforce_enabled
+
+    return enforce_enabled()
+
+
+def _probe_operator_uv() -> Optional[str]:
+    """Return an existing operator-managed uv executable, or ``None``.
+
+    Looks on ``PATH`` and in ``~/.local/bin`` but never returns the Hermes
+    managed binary itself — including when it is reached via a PATH entry,
+    symlink, junction, or Windows case-variant that aliases the managed root
+    (A6 alias-bypass defence). A managed-rooted alias is accepted only when its
+    provenance marker verifies. Used in place — never copied into managed
+    storage or relabelled release-verified.
+    """
+    from hermes_cli.supply_chain.managed import accept_operator_path
+
+    candidate = accept_operator_path(shutil.which("uv"), component="uv")
+    if candidate:
+        return candidate
+    name = "uv.exe" if platform.system() == "Windows" else "uv"
+    home_bin = Path.home() / ".local" / "bin" / name
+    if home_bin.is_file() and os.access(home_bin, os.X_OK):
+        return accept_operator_path(str(home_bin), component="uv")
+    return None
+
+
+def _uv_supply_chain_gate() -> None:
+    """Fail closed before running the mutable uv installer under enforce.
+
+    Secure by default: without a committed digest/provenance anchor, the Astral
+    installer is not executed. Running it requires an explicit operator opt-in
+    (``security.supply_chain.allow_unverified_components: ["uv"]``, or the
+    ``--allow-unverified-bootstrap`` flag for pre-config installers), in which
+    case it is labelled transport-trusted and writes no release-verified marker.
+    """
+    from hermes_cli.supply_chain import current_arch, current_platform
+    from hermes_cli.supply_chain.gate import GateAction, guard_install
+
+    gate = guard_install(
+        "uv", platform=current_platform(), arch=current_arch(), guidance=_UV_GUIDANCE
+    )
+    gate.raise_if_failed()
+    if gate.action is GateAction.RUN_COMPAT:
+        logger.info(
+            "uv bootstrap: running the unverified transport-trusted installer "
+            "(explicit compatibility opt-in); not release-verified"
+        )
+    # GateAction.PROCEED would download → verify_staged_artifact → atomic
+    # publish; no uv digest is committed yet, so it is unreachable today.
+
+
 def _install_uv(target: Path) -> None:
     """Bootstrap uv into *target* using the official standalone installer.
 
-    Uses ``UV_UNMANAGED_INSTALL`` (POSIX) or ``UV_INSTALL_DIR`` (Windows)
-    so the astral installer writes the binary directly into
-    ``$HERMES_HOME/bin/`` instead of ``~/.local/bin/``.
+    Guarded by the supply-chain gate: under the secure default this raises
+    :class:`FailClosed` instead of executing the mutable installer. Uses
+    ``UV_UNMANAGED_INSTALL`` (POSIX) or ``UV_INSTALL_DIR`` (Windows) so the
+    astral installer writes the binary directly into ``$HERMES_HOME/bin/``.
     """
+    _uv_supply_chain_gate()
     system = platform.system()
     env = {
         **os.environ,

@@ -874,7 +874,37 @@ def _pip_install(
 
     Returns the ``subprocess.CompletedProcess`` from whichever tier succeeded
     (or the last failure for the caller to inspect).
+
+    Supply-chain (WP4): every optional feature / memory-provider / setup-hook
+    package install funnels through here, and each resolves **unpinned,
+    unhashed** packages from PyPI. No such feature ships a committed
+    hash-locked graph, so under the secure default this fails closed with a
+    clean non-zero result (no subprocess, no network) instead of installing.
+    The operator either pre-installs the package with their environment manager
+    or opts in explicitly and scoped
+    (``security.supply_chain.allow_unverified_components: ["feature-pip"]``).
     """
+    try:
+        from hermes_cli.supply_chain.gate import compat_opt_in
+
+        _feature_pip_allowed = compat_opt_in("feature-pip")
+    except Exception:
+        _feature_pip_allowed = False
+    if not _feature_pip_allowed:
+        return subprocess.CompletedProcess(
+            [sys.executable, "-m", "pip", "install", *args],
+            returncode=1,
+            stdout="",
+            stderr=(
+                "automatic feature package install is disabled by default "
+                "(supply-chain enforce): pip would resolve unpinned, unhashed "
+                "packages from PyPI. Pre-install the package with your "
+                "environment manager, or allow it explicitly in config: "
+                "security.supply_chain.allow_unverified_components: "
+                '["feature-pip"]. See docs/security/supply-chain-migration.md.'
+            ),
+        )
+
     venv_root = Path(sys.executable).parent.parent
     uv_env = {**os.environ, "VIRTUAL_ENV": str(venv_root)}
 
@@ -1522,6 +1552,29 @@ def _run_cua_driver_installer(
     is_windows = system == "Windows"
     is_linux = system == "Linux"
 
+    # Supply-chain gate (WP4): the cua-driver installer fetches and executes
+    # code from the mutable trycua/cua main branch. It is disabled by default
+    # (no committed digest / pinned installer commit). A compatible existing
+    # driver is preserved; automatic repair returns the prior contract instead
+    # of running this. Requires an explicit operator opt-in to proceed.
+    try:
+        from hermes_cli.supply_chain.gate import compat_opt_in
+
+        _cua_compat = compat_opt_in("cua-driver")
+    except Exception:
+        _cua_compat = False
+    if not _cua_compat:
+        _print_warning(
+            "    cua-driver auto-install is disabled by default (supply-chain "
+            "enforce): its installer runs code from a mutable upstream branch."
+        )
+        _print_info(
+            "    Install cua-driver manually per trycua/cua, or allow it in "
+            "config: security.supply_chain.allow_unverified_components: "
+            "[\"cua-driver\"]. See docs/security/supply-chain-migration.md."
+        )
+        return False
+
     if is_windows:
         # Mirror the one-liner printed by cua_driver_install_hint().
         ps_oneliner = (
@@ -1927,7 +1980,10 @@ def _run_post_setup(post_setup_key: str):
             # Absolute npm path so .cmd shim executes on Windows.
             result = subprocess.run(
                 # --workspaces=false avoids resolving apps/desktop. See #38772.
-                [_npm_bin, "install", "--silent", "--workspaces=false"],
+                # A4: --ignore-scripts blocks any dependency install hook; the
+                # Camoufox engine is fetched separately at runtime (npx), not by
+                # a package postinstall.
+                [_npm_bin, "install", "--silent", "--ignore-scripts", "--workspaces=false"],
                 capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=str(PROJECT_ROOT),
                 creationflags=_post_setup_no_window_flags(),
             )

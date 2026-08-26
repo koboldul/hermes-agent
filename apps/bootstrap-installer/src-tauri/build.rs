@@ -61,6 +61,120 @@ fn main() {
         );
     }
 
+    // -----------------------------------------------------------------
+    // A10: bake the SHA-256 of the install scripts AT THE PINNED COMMIT so the
+    // runtime can byte-verify what it downloads/reuses. The digest is over the
+    // git BLOB bytes (`git cat-file blob <commit>:scripts/<file>`), which are
+    // exactly what raw.githubusercontent serves at that commit — independent of
+    // any working-tree line-ending (core.autocrlf) conversion. Only baked when
+    // an immutable commit pin is resolved; a mutable branch-follow build ships
+    // no digest (its target can legitimately change after build), and the
+    // runtime then skips verification unless attestation is required (in which
+    // case it fails closed).
+    // -----------------------------------------------------------------
+    if let Some(c) = &commit {
+        if let Some(d) = git_blob_sha256(c, "scripts/install.ps1") {
+            println!("cargo:rustc-env=BUILD_INSTALL_PS1_SHA256={d}");
+        }
+        if let Some(d) = git_blob_sha256(c, "scripts/install.sh") {
+            println!("cargo:rustc-env=BUILD_INSTALL_SH_SHA256={d}");
+        }
+        println!("cargo:rerun-if-changed=../../../scripts/install.ps1");
+        println!("cargo:rerun-if-changed=../../../scripts/install.sh");
+    }
+
+    // -----------------------------------------------------------------
+    // A10: a production (RELEASE-profile) installer MUST ship an attested
+    // identity — an exact FULL 40-char commit pin AND both install-script
+    // digests baked from that commit. This is UNCONDITIONAL: there is no
+    // optional environment gate for production. A `tauri build` (release) with
+    // no HERMES_BUILD_PIN_COMMIT therefore FAILS here. The repository release
+    // command (apps/bootstrap-installer/scripts/release-build.mjs) sets the pin.
+    // Debug builds (`tauri dev`, `tauri build --debug`, `cargo test`) are exempt
+    // and may follow a branch.
+    // -----------------------------------------------------------------
+    let is_release = std::env::var("PROFILE").map(|p| p == "release").unwrap_or(false);
+    if is_release {
+        let full_commit = commit
+            .as_deref()
+            .filter(|c| c.len() == 40 && c.chars().all(|ch| ch.is_ascii_hexdigit()))
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| {
+                panic!(
+                    "A10: a RELEASE (production) Hermes-Setup build requires \
+                     HERMES_BUILD_PIN_COMMIT set to an exact full 40-char commit SHA — \
+                     no branch/dev fallback is permitted in a production installer. \
+                     Use `npm run tauri:build:release` (apps/bootstrap-installer), which \
+                     resolves the pin from a clean checkout."
+                )
+            });
+        let ps1 = git_blob_sha256(&full_commit, "scripts/install.ps1").unwrap_or_else(|| {
+            panic!("A10: release build could not compute the install.ps1 digest at {full_commit}")
+        });
+        let sh = git_blob_sha256(&full_commit, "scripts/install.sh").unwrap_or_else(|| {
+            panic!("A10: release build could not compute the install.sh digest at {full_commit}")
+        });
+        // Re-emit defensively (idempotent — the commit block above already did
+        // when a pin was present; Cargo keeps the last value).
+        println!("cargo:rustc-env=BUILD_INSTALL_PS1_SHA256={ps1}");
+        println!("cargo:rustc-env=BUILD_INSTALL_SH_SHA256={sh}");
+
+        // A5/A4: INDEPENDENTLY verify the packaged/build-input IDENTITY at build
+        // time over the COMPLETE closure — HEAD must equal the pinned commit AND
+        // the build-input tree (the whole installer app incl Cargo.lock, the
+        // baked install scripts, the root package.json/lock, and the shared
+        // build inputs) must have NO tracked changes and NO untracked files, AND
+        // the source trees must have NO IGNORED shadow files (a stray .js over a
+        // committed .ts). git unavailable → fail closed. This does not trust any
+        // JSON/stamp; it re-interrogates git directly.
+        let repo_root = std::path::Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap())
+            .join("..")
+            .join("..")
+            .join("..");
+        let head = git_capture(&repo_root, &["rev-parse", "HEAD"]);
+        let status = git_capture(
+            &repo_root,
+            &[
+                "status",
+                "--porcelain",
+                "--untracked-files=all",
+                "--",
+                "package.json",
+                "package-lock.json",
+                "scripts/install.ps1",
+                "scripts/install.sh",
+                "apps/bootstrap-installer",
+                "apps/shared",
+            ],
+        );
+        if let Err(reason) = evaluate_input_identity(head.as_deref(), &full_commit, status.as_deref()) {
+            panic!("A5: RELEASE build-input identity check failed: {reason}");
+        }
+        // Shadow scan: gitignored .js/.d.ts in a source tree can shadow committed
+        // .ts at build time and is INVISIBLE to --untracked-files=all.
+        let ignored = git_capture(
+            &repo_root,
+            &[
+                "status",
+                "--porcelain",
+                "--ignored",
+                "--untracked-files=all",
+                "--",
+                "apps/bootstrap-installer/src",
+                "apps/shared/src",
+            ],
+        );
+        if let Err(reason) = evaluate_shadow_free(ignored.as_deref()) {
+            panic!("A5: RELEASE build-input shadow check failed: {reason}");
+        }
+
+        println!(
+            "cargo:warning=hermes-bootstrap: RELEASE build attested at commit {} (clean tree + no shadow files, both install-script digests baked)",
+            short(&full_commit)
+        );
+    }
+    println!("cargo:rerun-if-env-changed=PROFILE");
+
     // Rerun build.rs when HEAD moves. With branch-follow as the default the
     // baked commit no longer changes per-commit, but a branch *switch* changes
     // the detected branch name, so we still re-trigger. When an explicit
@@ -179,6 +293,82 @@ fn locate_git_dir() -> Option<std::path::PathBuf> {
         return None;
     }
     Some(std::path::PathBuf::from(s))
+}
+
+/// SHA-256 of a file's git-blob bytes at `commit` (A10 install-script
+/// attestation). Uses `git cat-file blob <commit>:<path>` so the digest is over
+/// the exact bytes raw.githubusercontent serves at that commit — no working-tree
+/// EOL conversion. Returns None when the object can't be read (the digest is
+/// then simply not baked, and the runtime skips verification unless attested).
+fn git_blob_sha256(commit: &str, path: &str) -> Option<String> {
+    use sha2::{Digest, Sha256};
+
+    let out = Command::new("git")
+        .args(["cat-file", "blob", &format!("{commit}:{path}")])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(&out.stdout);
+    Some(hex::encode(hasher.finalize()))
+}
+
+/// Run a git command in `repo_root` and capture trimmed stdout, or None when git
+/// is unavailable / the command fails (A5 fail-closed signal).
+fn git_capture(repo_root: &std::path::Path, args: &[&str]) -> Option<String> {
+    let out = Command::new("git")
+        .current_dir(repo_root)
+        .args(args)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8(out.stdout).ok().map(|s| s.trim().to_string())
+}
+
+/// A5 (pure, testable): decide whether the packaged/build-input tree is exactly
+/// the pinned commit and clean. `head`/`status` are `None` when git is
+/// unavailable → fail closed. Mirrors the JS beforePack guard so the two gates
+/// enforce the same contract independently.
+fn evaluate_input_identity(head: Option<&str>, pin: &str, status: Option<&str>) -> Result<(), String> {
+    let head = head.ok_or_else(|| "git unavailable (rev-parse HEAD)".to_string())?;
+    let head = head.trim().to_lowercase();
+    if head.len() != 40 || !head.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!("HEAD '{head}' is not a full 40-char commit"));
+    }
+    if head != pin.trim().to_lowercase() {
+        return Err(format!(
+            "HEAD {} does not match the pinned commit {}",
+            &head[..12.min(head.len())],
+            &pin[..12.min(pin.len())]
+        ));
+    }
+    let status = status.ok_or_else(|| "git status unavailable".to_string())?;
+    if !status.trim().is_empty() {
+        return Err(format!(
+            "build-input tree is NOT clean (tracked/untracked change: {})",
+            status.lines().next().unwrap_or("").trim()
+        ));
+    }
+    Ok(())
+}
+
+/// A5 (pure, testable): reject when the `git status --ignored` scan of the
+/// source trees is non-empty — a gitignored file present in a source dir (e.g. a
+/// stray `.js` over a committed `.ts`) can shadow the real source at build time.
+/// `None` (git unavailable) fails closed.
+fn evaluate_shadow_free(ignored_status: Option<&str>) -> Result<(), String> {
+    let status = ignored_status.ok_or_else(|| "git status --ignored unavailable".to_string())?;
+    if !status.trim().is_empty() {
+        return Err(format!(
+            "source tree contains ignored/untracked shadow file(s): {}",
+            status.lines().next().unwrap_or("").trim()
+        ));
+    }
+    Ok(())
 }
 
 fn short(commit: &str) -> &str {

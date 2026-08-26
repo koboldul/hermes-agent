@@ -9,7 +9,7 @@
  *              │ onResize    terminal resize → `\x1b[RESIZE:cols;rows]`   .
  *              │ write(data) PTY output bytes → VT100 parser              .
  *              ▼                                                          .
- *     WebSocket /api/pty?token=<session>                                  .
+ *     WebSocket /api/pty?ticket=<one-time>                                .
  *          ▼                                                              .
  *     FastAPI pty_ws  (hermes_cli/web_server.py)                          .
  *          ▼                                                              .
@@ -34,7 +34,7 @@ import { ChatSidebar } from "@/components/ChatSidebar";
 import { ChatSessionList } from "@/components/ChatSessionList";
 import { usePageHeader } from "@/contexts/usePageHeader";
 import { useI18n } from "@/i18n";
-import { api } from "@/lib/api";
+import { api, hasBrowserSessionAuth } from "@/lib/api";
 import { latchChatActivation } from "@/lib/chat-activation";
 import { copyTextToClipboard } from "@/lib/clipboard";
 import { normalizeSessionTitle } from "@/lib/chat-title";
@@ -76,7 +76,7 @@ import {
   transferMayContainImage,
   uploadChatImage,
 } from "@/lib/chatImagePaste";
-import { maybeReloadForLoopbackWsAuthFailure } from "@/lib/dashboard-auth-reload";
+import { maybeReturnToBootstrapGateOnWsAuthFailure } from "@/lib/dashboard-auth-reload";
 import { PluginSlot } from "@/plugins";
 import { useTheme } from "@/themes";
 import { useProfileScope } from "@/contexts/useProfileScope";
@@ -207,13 +207,14 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
   const [searchParams, setSearchParams] = useSearchParams();
   // Lazy-init: the missing-token check happens at construction so the effect
   // body doesn't have to setState (React 19's set-state-in-effect rule).
-  // In gated (OAuth) mode the server intentionally omits the session token —
-  // the dashboard API layer authenticates the WS via a single-use ticket,
-  // so a missing token there is expected, not an error.
+  // In gated (OAuth) AND loopback local-browser mode the server intentionally
+  // omits the session token — the dashboard API layer authenticates the WS via
+  // a single-use ticket (minted from the session cookie), so a missing token
+  // in either browser-session mode is expected, not an error.
   const [banner, setBanner] = useState<string | null>(() =>
     typeof window !== "undefined" &&
     !window.__HERMES_SESSION_TOKEN__ &&
-    !window.__HERMES_AUTH_REQUIRED__
+    !hasBrowserSessionAuth()
       ? "Session token unavailable. Open this page through `hermes dashboard`, not directly."
       : null,
   );
@@ -520,11 +521,12 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     const termWrap = termWrapRef.current;
 
     const token = window.__HERMES_SESSION_TOKEN__;
-    const gated = !!window.__HERMES_AUTH_REQUIRED__;
-    // Banner already initialised above; just bail before wiring xterm/WS.
-    // In gated mode the token is absent by design — api.buildWsUrl() mints
-    // a WS ticket instead, so don't bail; let the effect reach that path.
-    if (!token && !gated) {
+    // Banner already initialised above; just bail before wiring xterm/WS when
+    // there is no way to authenticate. In gated AND loopback local-browser
+    // mode the token is absent by design — api.buildWsUrl() mints a WS ticket
+    // from the session cookie instead, so don't bail; let the effect reach
+    // that path.
+    if (!token && !hasBrowserSessionAuth()) {
       return;
     }
 
@@ -1058,12 +1060,13 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       });
     });
 
-    // WebSocket. In gated mode (``window.__HERMES_AUTH_REQUIRED__``) this
-    // awaits a single-use ticket via /api/auth/ws-ticket before opening;
-    // in loopback mode it resolves synchronously against the injected
-    // session token. The IIFE keeps the outer effect synchronous so its
-    // ``return cleanup`` stays at the top level; handlers + disposables
-    // are hoisted to ``let`` bindings the cleanup closes over.
+    // WebSocket. In gated OAuth/password mode AND loopback local-browser mode
+    // (``buildWsAuthParam``) this awaits a single-use ticket via
+    // /api/auth/ws-ticket before opening; only a trusted service caller with an
+    // actual token resolves synchronously against it. The IIFE keeps the outer
+    // effect synchronous so its ``return cleanup`` stays at the top level;
+    // handlers + disposables are hoisted to ``let`` bindings the cleanup closes
+    // over.
     let unmounting = false;
     // The implicit active-session fallback (no `?resume=` on the URL) only
     // becomes known once the server's control frame arrives (see
@@ -1349,14 +1352,14 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       console.warn(`[chat] PTY WebSocket closed code=${ev.code}${why}`);
       setLastCloseCode(ev.code);
       if (ev.code === 4401) {
-        if (maybeReloadForLoopbackWsAuthFailure(ev.code)) {
+        if (maybeReturnToBootstrapGateOnWsAuthFailure(ev.code)) {
           return;
         }
         setPtyState("closed");
         setBanner(
           ev.reason
-            ? `Auth failed (${ev.reason}). Reload to refresh the session.`
-            : "Auth failed. Reload the page to refresh the session token.",
+            ? `Auth failed (${ev.reason}). Reload to sign in again.`
+            : "Auth failed. Reload the page to sign in again.",
         );
         return;
       }
@@ -1984,5 +1987,6 @@ declare global {
   interface Window {
     __HERMES_SESSION_TOKEN__?: string;
     __HERMES_AUTH_REQUIRED__?: boolean;
+    __HERMES_LOCAL_BROWSER_AUTH__?: boolean;
   }
 }

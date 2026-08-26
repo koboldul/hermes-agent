@@ -1,8 +1,10 @@
+import { useStore } from '@nanostores/react'
 import type { ComponentProps, ReactNode } from 'react'
 import { useEffect, useMemo, useState } from 'react'
 
 import { ArrowUpRight } from '@/lib/icons'
 import { IS_MAC } from '@/lib/keybinds/combo'
+import { $resolveLinkMetadata } from '@/store/link-metadata'
 
 import { resolveBrandIcon } from './brand-icon'
 import { cn } from './utils'
@@ -167,6 +169,9 @@ export function fetchLinkTitle(url: string): Promise<string> {
 }
 
 export function useLinkTitle(url?: null | string): string {
+  // Automatic resolution is opt-in (SEC-AUDIT-003): with the setting off,
+  // rendering a link makes NO request — the caller shows its slug/host fallback.
+  const auto = useStore($resolveLinkMetadata)
   const normalizedUrl = useMemo(() => (url ? normalizeExternalUrl(url) : ''), [url])
   const key = useMemo(() => (normalizedUrl ? titleCacheKey(normalizedUrl) : ''), [normalizedUrl])
   const [title, setTitle] = useState(() => (key ? (titleCache.get(key) ?? '') : ''))
@@ -182,7 +187,12 @@ export function useLinkTitle(url?: null | string): string {
 
     subs.add(setTitle)
     titleSubs.set(key, subs)
-    void fetchLinkTitle(normalizedUrl)
+
+    // Subscribe either way so an explicit fetch (or a title resolved for another
+    // link to the same target) updates this label; only reach out when opted in.
+    if (auto) {
+      void fetchLinkTitle(normalizedUrl)
+    }
 
     return () => {
       subs.delete(setTitle)
@@ -191,7 +201,7 @@ export function useLinkTitle(url?: null | string): string {
         titleSubs.delete(key)
       }
     }
-  }, [key, normalizedUrl])
+  }, [auto, key, normalizedUrl])
 
   return title
 }

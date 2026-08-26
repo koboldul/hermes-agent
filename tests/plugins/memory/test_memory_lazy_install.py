@@ -36,6 +36,20 @@ import pytest
 import tools.lazy_deps as ld
 
 
+@pytest.fixture(autouse=True)
+def _lazy_gate_opt_in(monkeypatch):
+    """WP4 gates automatic lazy PyPI installs behind the supply-chain posture
+    (``_allow_lazy_installs`` → ``compat_opt_in('lazy-deps')``). These tests
+    exercise the ``ensure()`` / durable-target MECHANICS, so opt in; the
+    fail-closed default is proved in tests/supply_chain/test_installer_gates.py.
+    """
+    monkeypatch.setattr(
+        "hermes_cli.supply_chain.gate._sc_config",
+        lambda: {"enforce": True, "allow_unverified_components": ["*"]},
+        raising=False,
+    )
+
+
 MEMORY_FEATURES = ("memory.supermemory", "memory.mem0")
 
 

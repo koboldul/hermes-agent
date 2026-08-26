@@ -106,6 +106,24 @@ describe('DesktopInstallOverlay first-run setup', () => {
     expect(screen.queryByText(/Fetching installer manifest/i)).toBeNull()
   })
 
+  it('explains the operator-installed uv prerequisite on the local-install choice', async () => {
+    // Contract (blocker A2): the GUI install path must surface that `uv` is an
+    // operator-provided prerequisite the installer will NOT auto-download —
+    // not advertise impossible automatic provisioning. Asserts the property
+    // (uv named as a prerequisite the installer won't fetch), not exact wording.
+    installDesktopMock(
+      bootstrapState({
+        setupChoice: { platform: 'win32', activeRoot: 'C:\\Users\\me\\AppData\\Local\\hermes\\hermes-agent' }
+      })
+    )
+
+    render(<DesktopInstallOverlay />)
+
+    const localDesc = await screen.findByText(/Install uv first/i)
+    expect(localDesc.textContent).toMatch(/uv/)
+    expect(localDesc.textContent).toMatch(/won.t auto-download it/i)
+  })
+
   it('continues local bootstrap only when Install Hermes locally is selected', async () => {
     const desktop = installDesktopMock(
       bootstrapState({

@@ -63,6 +63,8 @@ class TestInstallDependenciesRunner:
         # they opt back in — the same both-directions override
         # tests/tools/test_lazy_deps.py uses.
         with _patch.dict(os.environ, {"HERMES_DISABLE_LAZY_INSTALLS": "0"}), \
+             _patch("hermes_cli.supply_chain.gate._sc_config",
+                    lambda: {"enforce": True, "allow_unverified_components": ["lazy-deps"]}), \
              patch("plugins.memory.find_provider_dir", return_value=tmp_path), \
              patch("hermes_cli.tools_config.shutil.which", side_effect=which_side_effect), \
              patch("hermes_cli.tools_config.subprocess.run", fake_run):

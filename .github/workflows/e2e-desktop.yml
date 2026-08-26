@@ -47,14 +47,21 @@ jobs:
 
       - name: grab npm 12
         run: |
-          npm i -g npm@12
+          node scripts/ci/install-npm-pinned.mjs
 
-      # Full npm ci (not --ignore-scripts): electron's postinstall
-      # downloads the binary we launch, and node-pty's native build is
-      # needed for the terminal pane.
+      # A4: install WITHOUT running lifecycle scripts (npm's allowScripts field
+      # is ignored by some supported npm majors, so it is not a guarantee).
       - uses: ./.github/actions/retry
         with:
-          command: npm ci
+          command: npm ci --ignore-scripts
+
+      # Then run ONLY the reviewed, allowlisted lifecycle scripts (electron's
+      # binary download, node-pty's prebuild, esbuild, fsevents,
+      # electron-winstaller) through the audited orchestrator. get-windows's
+      # `node-pre-gyp install --fallback-to-build` NEVER runs — its binding is
+      # staged from a manifest-pinned, digest-verified artifact instead.
+      - name: Run allowlisted lifecycle scripts (A4)
+        run: node apps/desktop/scripts/run-allowed-lifecycle.mjs
 
       # ── Python (for the hermes serve backend) ──────────────────────────
       - name: Install uv

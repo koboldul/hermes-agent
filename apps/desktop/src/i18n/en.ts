@@ -597,6 +597,9 @@ export const en: Translations = {
       embedsAlways: 'Always',
       embedsOff: 'Off',
       embedsReset: (count: number) => `Reset ${count} allowed ${count === 1 ? 'service' : 'services'}`,
+      linkPreviewsTitle: 'Link Previews',
+      linkPreviewsDesc:
+        'Resolve page titles and site icons for links. Off by default: Hermes makes no request until you turn this on, and the app still validates and pins every destination.',
       product: 'Product',
       productDesc: 'Human-friendly tool activity with concise summaries.',
       technical: 'Technical',
@@ -1322,6 +1325,16 @@ export const en: Translations = {
       actionFailed: 'Skill action failed',
       actionLog: 'Action log',
       alreadyInstalled: (name: string) => `"${name}" is already installed`,
+      confirmTitle: (name: string) => `Install "${name}" from the Skills Hub?`,
+      confirmDetail:
+        'This request came from the embedded Hub browser. Review the pinned identity below before installing — Hermes re-verifies it on the server before activation.',
+      confirmSource: (source: string) => `Source: ${source}`,
+      confirmCommitLabel: 'Pinned commit',
+      confirmDigestLabel: 'Bundle digest',
+      confirmUnverifiedCommit: 'No transport-resolved commit — pinned by content digest only.',
+      confirmResolving: 'Verifying skill identity…',
+      confirmInstall: 'Install skill',
+      confirmCancel: 'Cancel',
       pickerTitle: 'Skills Hub',
       pickerBrowse: 'Browse the full hub',
       pickerHide: 'Hide the hub browser',
@@ -2627,7 +2640,8 @@ export const en: Translations = {
     connectExistingShort: 'Connect existing',
     connectExistingDesc: 'Use a remote backend with a session token or browser sign-in. No local install will start.',
     installLocalTitle: 'Install Hermes locally',
-    installLocalDesc: 'Download Hermes, create its Python environment, and run the backend on this computer.',
+    installLocalDesc:
+      'Download Hermes, build its Python environment with uv, and run the backend on this computer. Install uv first — the installer uses your operator-installed uv and won’t auto-download it (Windows: winget install astral-sh.uv; macOS/Linux: brew install uv or pipx install uv).',
     localStartUnavailable: 'Local installation could not start. Restart Hermes Desktop and try again.',
     remoteSetupTitle: 'Connect to existing Hermes',
     remoteSetupDesc: 'Enter your gateway URL. Hermes Desktop will detect whether it needs a token or browser sign-in.',
@@ -2658,9 +2672,9 @@ export const en: Translations = {
     settingUpTitle: 'Setting up Hermes Agent',
     finishingTitle: 'Finishing up',
     failedDesc:
-      'One of the install steps failed. On Windows, this can happen if another Hermes CLI or desktop instance is running. Stop any running Hermes instances, then retry. Check the details below or the desktop log for the full transcript.',
+      'One of the install steps failed. A common cause is a missing prerequisite: install uv first (Windows: winget install astral-sh.uv; macOS/Linux: brew install uv or pipx install uv), then retry — the installer uses your uv and won’t auto-download it (Node.js and Git behave the same way). On Windows, this can also happen if another Hermes CLI or desktop instance is running; stop any running Hermes instances, then retry. Check the details below or the desktop log for the full transcript.',
     activeDesc:
-      'This is a one-time setup. The Hermes installer is downloading dependencies and configuring your machine. Subsequent launches will skip this step.',
+      'This is a one-time setup. Using your installed uv, the Hermes installer is downloading the remaining dependencies and configuring your machine. Subsequent launches will skip this step.',
     progress: (completed, total) => `${completed} of ${total} steps complete`,
     currentStage: stage => ` -- now: ${stage}`,
     fetchingManifest: 'Fetching installer manifest...',

@@ -70,6 +70,67 @@ fn is_valid_commit(s: &str) -> bool {
     (7..=40).contains(&len) && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
+/// A full, exact 40-char commit SHA — the only identity an ATTESTED
+/// (production) installer will accept (A10).
+fn is_full_commit(s: &str) -> bool {
+    s.len() == 40 && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// A10: a production (RELEASE-profile) installer requires an exact full-commit
+/// installer identity UNCONDITIONALLY — there is NO optional environment gate.
+/// `attested_required` is the pure policy: attestation is required whenever the
+/// binary is a release build, OR (in a debug build) when the operator explicitly
+/// opts in. Only an explicit debug build may run in dev/branch mode.
+pub(crate) fn attested_required(is_release: bool, env_opt_in: bool) -> bool {
+    is_release || env_opt_in
+}
+
+/// A10: whether this installer must resolve an exact full-commit identity (no
+/// branch raw-script, no dev shortcut, no stale cached-script fallback). Release
+/// builds are ALWAYS attested; a debug build may opt in via
+/// `HERMES_SETUP_REQUIRE_ATTESTED=1`.
+pub fn require_attested() -> bool {
+    // `cfg!(debug_assertions)` is false in a release build (`tauri build`) and
+    // true in a debug build (`tauri dev` / `tauri build --debug` / `cargo test`).
+    attested_required(
+        !cfg!(debug_assertions),
+        matches!(option_env!("HERMES_SETUP_REQUIRE_ATTESTED"), Some("1")),
+    )
+}
+
+/// Resolve the (ref, immutable) pair to fetch, enforcing the attested policy.
+///
+/// Attested mode: the pin MUST be a full 40-char commit SHA. A branch ref, a
+/// short SHA, or no pin at all is rejected — there is no branch raw-script
+/// fallback, and because the result is always immutable there is no stale
+/// cached fallback either. Non-attested mode keeps the dev/CI behavior (a full
+/// or short SHA is immutable; a branch is a mutable HEAD-tracking ref).
+pub(crate) fn resolve_pin_source(pin: &Pin, require_attested: bool) -> Result<(String, bool)> {
+    if require_attested {
+        return match &pin.commit {
+            Some(c) if is_full_commit(c) => Ok((c.clone(), true)),
+            Some(other) => Err(anyhow!(
+                "attested installer requires a full 40-char commit SHA; `{other}` is not one — \
+                 refusing a branch/short-ref installer identity"
+            )),
+            None => Err(anyhow!(
+                "attested installer requires a pinned commit; no branch raw-script fallback is permitted"
+            )),
+        };
+    }
+
+    match (&pin.commit, &pin.branch) {
+        (Some(c), _) if is_valid_commit(c) => Ok((c.clone(), true)),
+        (_, Some(b)) if !b.trim().is_empty() => Ok((b.clone(), false)),
+        (Some(other), _) => Err(anyhow!(
+            "install script pin commit `{other}` is not a valid git SHA"
+        )),
+        _ => Err(anyhow!(
+            "no install-script pin supplied — installer cannot resolve a script source"
+        )),
+    }
+}
+
 /// Resolver cache plan for a pin that already has a local path computed.
 ///
 /// Immutable commit pins reuse cache forever. Mutable branch/tag pins always
@@ -100,47 +161,36 @@ pub(crate) fn cache_plan(immutable: bool, cached_exists: bool) -> CachePlan {
 pub async fn resolve(
     kind: ScriptKind,
     pin: &Pin,
+    require_attested: bool,
     emit_log: &impl Fn(&str),
 ) -> Result<ResolvedScript> {
-    // 1. Dev shortcut.
-    if let Ok(repo_root) = std::env::var("HERMES_SETUP_DEV_REPO_ROOT") {
-        let candidate = PathBuf::from(repo_root).join("scripts").join(kind.filename());
-        if candidate.exists() {
-            emit_log(&format!(
-                "[bootstrap] dev mode — using local {} at {}",
-                kind.filename(),
-                candidate.display()
-            ));
-            return Ok(ResolvedScript {
-                path: candidate,
-                source: ScriptSource::DevCheckout,
-                commit: pin.commit.clone(),
-                branch: pin.branch.clone(),
-            });
+    // 1. Dev shortcut — DISABLED for attested/production installers so a stray
+    //    HERMES_SETUP_DEV_REPO_ROOT can never substitute an unattested script.
+    if !require_attested {
+        if let Ok(repo_root) = std::env::var("HERMES_SETUP_DEV_REPO_ROOT") {
+            let candidate = PathBuf::from(repo_root).join("scripts").join(kind.filename());
+            if candidate.exists() {
+                emit_log(&format!(
+                    "[bootstrap] dev mode — using local {} at {}",
+                    kind.filename(),
+                    candidate.display()
+                ));
+                return Ok(ResolvedScript {
+                    path: candidate,
+                    source: ScriptSource::DevCheckout,
+                    commit: pin.commit.clone(),
+                    branch: pin.branch.clone(),
+                });
+            }
         }
     }
 
     // 2. (Not implemented) bundled fallback.
 
-    // 3. Network. Pin must be a real commit or a branch ref.
-    //
-    // Commit SHAs are immutable — permanent cache reuse is safe.
-    // Branch/tag pins are moving refs: always try to refresh so "Retry install"
-    // cannot keep reusing a poisoned install-main.ps1 forever (#67193).
-    let (commit_or_ref, immutable) = match (&pin.commit, &pin.branch) {
-        (Some(c), _) if is_valid_commit(c) => (c.clone(), true),
-        (_, Some(b)) if !b.trim().is_empty() => (b.clone(), false),
-        (Some(other), _) => {
-            return Err(anyhow!(
-                "install script pin commit `{other}` is not a valid git SHA"
-            ));
-        }
-        _ => {
-            return Err(anyhow!(
-                "no install-script pin supplied — installer cannot resolve a script source"
-            ));
-        }
-    };
+    // 3. Network. Attested installers require an exact full-commit identity and
+    //    have no branch/stale fallback; dev/CI keep the immutable-commit /
+    //    mutable-branch behavior. See resolve_pin_source.
+    let (commit_or_ref, immutable) = resolve_pin_source(pin, require_attested)?;
 
     let cached = cached_path(kind, &commit_or_ref);
     match cache_plan(immutable, cached.exists()) {
@@ -154,6 +204,11 @@ pub async fn resolve(
             // pre-BOM-fix installer would keep the #67193 encoding bug on
             // every retry. Upgrade it in place before handing it out.
             upgrade_cached_script(kind, &cached, emit_log);
+            // A10: a cached script is NOT trusted on its path alone — verify its
+            // bytes against the baked pinned-commit digest before reuse. An
+            // attested installer fails closed if the cache is tampered or the
+            // build shipped no digest.
+            verify_cached_script(kind, &cached, require_attested)?;
             return Ok(ResolvedScript {
                 path: cached,
                 source: ScriptSource::Cached,
@@ -173,7 +228,7 @@ pub async fn resolve(
                 truncate_ref(&commit_or_ref)
             ));
 
-            match download(kind, &commit_or_ref, &cached).await {
+            match download(kind, &commit_or_ref, &cached, require_attested).await {
                 Ok(()) => {
                     emit_log(&format!("[bootstrap] cached to {}", cached.display()));
                     Ok(ResolvedScript {
@@ -192,6 +247,11 @@ pub async fn resolve(
                     ));
                     // Stale cache can predate the BOM fix too — upgrade it.
                     upgrade_cached_script(kind, &cached, emit_log);
+                    // Still verify the stale cache against any baked digest. In
+                    // non-attested mutable-ref mode there is no baked digest, so
+                    // this is a no-op; an attested installer never reaches the
+                    // stale path (its pins are immutable, stale_ok=false).
+                    verify_cached_script(kind, &cached, require_attested)?;
                     Ok(ResolvedScript {
                         path: cached,
                         source: ScriptSource::Cached,
@@ -248,6 +308,101 @@ fn truncate_ref(s: &str) -> &str {
 /// GUI bootstrap runs the *cached file* via `-File`, so we write the opposite
 /// (#67193).
 const UTF8_BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
+
+/// A10 — the SHA-256 baked at build time for this script AT THE PINNED COMMIT
+/// (build.rs `git cat-file blob <commit>:scripts/<file>`). `None` on a build
+/// with no immutable commit pin (branch-follow dev build).
+fn attested_script_sha256(kind: ScriptKind) -> Option<String> {
+    let raw = match kind {
+        ScriptKind::Ps1 => option_env!("BUILD_INSTALL_PS1_SHA256"),
+        ScriptKind::Sh => option_env!("BUILD_INSTALL_SH_SHA256"),
+    }?;
+    normalize_digest(raw)
+}
+
+fn normalize_digest(raw: &str) -> Option<String> {
+    let s = raw.trim().to_ascii_lowercase();
+    if s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Some(s)
+    } else {
+        None
+    }
+}
+
+/// The canonical script body the attested digest is computed over: the raw git
+/// blob bytes. A cached `.ps1` carries the UTF-8 BOM our writer prepends, so
+/// strip it before hashing to compare against the (BOM-less) attested digest.
+fn canonical_script_body(kind: ScriptKind, bytes: &[u8]) -> &[u8] {
+    match kind {
+        ScriptKind::Ps1 if bytes.starts_with(UTF8_BOM) => &bytes[UTF8_BOM.len()..],
+        _ => bytes,
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
+}
+
+/// Pure attestation check (unit-testable without a baked env). Verifies
+/// `bytes` (a network body or a cached file) against `expected`:
+///   * `Some(digest)` — the body's SHA-256 MUST equal it, else fail closed.
+///   * `None` + attested build — fail closed (an attested installer must have a
+///     baked digest to verify against).
+///   * `None` + non-attested build — allowed (dev/branch-follow has no pin).
+pub(crate) fn verify_body_against(
+    expected: Option<&str>,
+    kind: ScriptKind,
+    bytes: &[u8],
+    require_attested: bool,
+) -> Result<()> {
+    match expected {
+        Some(exp) => {
+            let got = sha256_hex(canonical_script_body(kind, bytes));
+            if got != exp.trim().to_ascii_lowercase() {
+                return Err(anyhow!(
+                    "install {} failed attestation: sha256 {} != expected {} — refusing a \
+                     tampered or mirror-substituted script at the pinned commit",
+                    kind.filename(),
+                    got,
+                    exp
+                ));
+            }
+            Ok(())
+        }
+        None if require_attested => Err(anyhow!(
+            "attested installer has no baked digest for {} — the build must embed \
+             BUILD_INSTALL_*_SHA256 at the pinned commit before an attested installer \
+             may execute a downloaded script",
+            kind.filename()
+        )),
+        None => Ok(()),
+    }
+}
+
+/// Verify script `bytes` against the build-baked digest for `kind`. Applied to
+/// both freshly-downloaded bytes and reused cache bytes so a poisoned cache is
+/// rejected just like a poisoned download (A10 — "stale cache is insufficient").
+pub(crate) fn verify_script_bytes(
+    kind: ScriptKind,
+    bytes: &[u8],
+    require_attested: bool,
+) -> Result<()> {
+    let baked = attested_script_sha256(kind);
+    verify_body_against(baked.as_deref(), kind, bytes, require_attested)
+}
+
+/// Read a cached script file and verify it against the baked digest. Used on
+/// the cache-reuse paths so an attested installer never executes an unverified
+/// on-disk script.
+fn verify_cached_script(kind: ScriptKind, cached: &Path, require_attested: bool) -> Result<()> {
+    let bytes = std::fs::read(cached)
+        .with_context(|| format!("reading cached script {} for attestation", cached.display()))?;
+    verify_script_bytes(kind, &bytes, require_attested)
+}
 
 /// Prepare bytes for the on-disk bootstrap cache.
 ///
@@ -322,7 +477,12 @@ fn upgrade_cached_script(kind: ScriptKind, cached: &Path, emit_log: &impl Fn(&st
 /// black-holed connection (captive portal, hung proxy, silently dropped
 /// packets) never errors — the whole bootstrap would hang here instead of
 /// falling back to the cached script.
-async fn download(kind: ScriptKind, commit_or_ref: &str, dest_path: &Path) -> Result<()> {
+async fn download(
+    kind: ScriptKind,
+    commit_or_ref: &str,
+    dest_path: &Path,
+    require_attested: bool,
+) -> Result<()> {
     let url = format!(
         "https://raw.githubusercontent.com/NousResearch/hermes-agent/{}/scripts/{}",
         commit_or_ref,
@@ -367,6 +527,12 @@ async fn download(kind: ScriptKind, commit_or_ref: &str, dest_path: &Path) -> Re
         .bytes()
         .await
         .with_context(|| format!("reading body of {url}"))?;
+    // A10: byte-verify the freshly downloaded script against the baked
+    // pinned-commit digest BEFORE it is written to the cache or executed. A
+    // pinned-commit URL is not sufficient — a compromised mirror/CDN or a
+    // tampered response must be rejected here.
+    verify_script_bytes(kind, &bytes, require_attested)
+        .with_context(|| format!("verifying downloaded {} from {url}", kind.filename()))?;
     let bytes = prepare_cached_script_bytes(kind, &bytes);
 
     let mut file = tokio::fs::File::create(&tmp_path)
@@ -402,6 +568,146 @@ mod tests {
         assert!(!is_valid_commit("02d269"));
         assert!(!is_valid_commit("not-a-sha"));
         assert!(!is_valid_commit(""));
+    }
+
+    // ── A10: attested (production) installer identity ──────────────────────
+    #[test]
+    fn is_full_commit_requires_exactly_40_hex() {
+        assert!(is_full_commit("02d26981d3d4ad50e142399b8476f59ad5953ff0"));
+        assert!(!is_full_commit("02d2698")); // short
+        assert!(!is_full_commit("02d26981d3d4ad50e142399b8476f59ad5953ff")); // 39
+        assert!(!is_full_commit("02d26981d3d4ad50e142399b8476f59ad5953ff0a")); // 41
+        assert!(!is_full_commit("main"));
+    }
+
+    // ── A10: install-script BYTE attestation ───────────────────────────────
+    fn digest_of(bytes: &[u8]) -> String {
+        sha256_hex(bytes)
+    }
+
+    #[test]
+    fn attested_required_is_unconditional_in_release() {
+        // Release profile → attestation required, no env gate.
+        assert!(attested_required(true, false));
+        assert!(attested_required(true, true));
+        // Debug profile → dev/branch mode allowed unless the operator opts in.
+        assert!(!attested_required(false, false));
+        assert!(attested_required(false, true));
+    }
+
+    #[test]
+    fn verify_accepts_bytes_matching_the_baked_digest() {
+        let body = b"# install.sh\necho hello\n";
+        let expected = digest_of(body);
+        assert!(verify_body_against(Some(&expected), ScriptKind::Sh, body, true).is_ok());
+    }
+
+    #[test]
+    fn verify_rejects_tampered_or_mirror_substituted_bytes() {
+        let expected = digest_of(b"# the real script\n");
+        let tampered = b"# EVIL substituted script\n";
+        let err = verify_body_against(Some(&expected), ScriptKind::Sh, tampered, true).unwrap_err();
+        assert!(err.to_string().contains("failed attestation"), "{err}");
+    }
+
+    #[test]
+    fn verify_ps1_matches_after_cache_bom_is_stripped() {
+        // The baked digest is over the BOM-less git blob; a cached .ps1 carries
+        // the UTF-8 BOM our writer prepends. Verification must still pass.
+        let raw = b"Write-Host 'hi'\r\n";
+        let expected = digest_of(raw);
+        let cached = prepare_cached_script_bytes(ScriptKind::Ps1, raw);
+        assert!(cached.starts_with(UTF8_BOM));
+        assert!(verify_body_against(Some(&expected), ScriptKind::Ps1, &cached, true).is_ok());
+    }
+
+    #[test]
+    fn verify_fails_closed_when_attested_but_no_baked_digest() {
+        let err = verify_body_against(None, ScriptKind::Ps1, b"anything", true).unwrap_err();
+        assert!(err.to_string().contains("no baked digest"), "{err}");
+    }
+
+    #[test]
+    fn verify_is_a_noop_when_not_attested_and_no_digest() {
+        // Dev / mutable branch-follow build ships no digest and does not enforce.
+        assert!(verify_body_against(None, ScriptKind::Sh, b"whatever", false).is_ok());
+    }
+
+    #[test]
+    fn verify_still_enforces_a_present_digest_even_when_not_attested() {
+        // If a digest IS baked (immutable commit pin) it is enforced regardless
+        // of the attested flag — an immutable pin's content is fixed.
+        let expected = digest_of(b"real\n");
+        assert!(verify_body_against(Some(&expected), ScriptKind::Sh, b"real\n", false).is_ok());
+        assert!(verify_body_against(Some(&expected), ScriptKind::Sh, b"fake\n", false).is_err());
+    }
+
+    #[test]
+    fn normalize_digest_validates_shape() {
+        assert_eq!(normalize_digest(&"A".repeat(64)), Some("a".repeat(64)));
+        assert_eq!(normalize_digest("  " ), None);
+        assert_eq!(normalize_digest(&"a".repeat(63)), None); // too short
+        assert_eq!(normalize_digest("xyz"), None); // non-hex
+    }
+
+    #[test]
+    fn verify_cached_script_reads_and_checks_bytes() {
+        let dir = std::env::temp_dir().join(format!("hermes-attest-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("install.sh");
+        std::fs::write(&path, b"echo real\n").unwrap();
+        let good = digest_of(b"echo real\n");
+
+        // Matching baked digest → the cached file passes.
+        assert!(verify_body_against(Some(&good), ScriptKind::Sh, &std::fs::read(&path).unwrap(), true).is_ok());
+        // A mutated cache is rejected.
+        std::fs::write(&path, b"echo EVIL\n").unwrap();
+        assert!(verify_body_against(Some(&good), ScriptKind::Sh, &std::fs::read(&path).unwrap(), true).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn attested_requires_an_exact_full_commit_no_branch_or_short() {
+        let full = "0".repeat(40);
+        // A full commit is accepted and is immutable.
+        let (r, immutable) = resolve_pin_source(
+            &Pin { commit: Some(full.clone()), branch: Some("main".into()) },
+            true,
+        )
+        .unwrap();
+        assert_eq!(r, full);
+        assert!(immutable);
+
+        // A branch-only pin is rejected — no branch raw-script fallback.
+        assert!(resolve_pin_source(&Pin { commit: None, branch: Some("main".into()) }, true).is_err());
+        // A short SHA is rejected.
+        assert!(resolve_pin_source(&Pin { commit: Some("02d2698".into()), branch: None }, true).is_err());
+        // No pin at all is rejected.
+        assert!(resolve_pin_source(&Pin::default(), true).is_err());
+    }
+
+    #[test]
+    fn non_attested_keeps_branch_and_short_sha_behavior() {
+        let (r, imm) =
+            resolve_pin_source(&Pin { commit: None, branch: Some("main".into()) }, false).unwrap();
+        assert_eq!(r, "main");
+        assert!(!imm);
+
+        let (r2, imm2) =
+            resolve_pin_source(&Pin { commit: Some("02d2698".into()), branch: None }, false).unwrap();
+        assert_eq!(r2, "02d2698");
+        assert!(imm2);
+    }
+
+    #[test]
+    fn attested_pin_is_immutable_so_there_is_no_stale_cache_fallback() {
+        // An attested pin is always immutable, so cache_plan never yields a
+        // stale-OK fetch — a failed download errors instead of serving stale.
+        assert_eq!(cache_plan(/*immutable=*/ true, /*cached_exists=*/ true), CachePlan::Reuse);
+        assert_eq!(
+            cache_plan(/*immutable=*/ true, /*cached_exists=*/ false),
+            CachePlan::Fetch { stale_ok: false }
+        );
     }
 
     #[test]

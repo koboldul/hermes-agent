@@ -95,6 +95,16 @@ _ALLOWED: dict[tuple[str, str], str] = {
         "agent-browser runs via `npx`, resolved against the extended browser "
         "PATH that _merge_browser_path() already seeds with the managed dirs."
     ),
+    ("hermes_cli/managed_uv.py", "uv"): (
+        "_probe_operator_uv() looks for an OPERATOR-installed uv to use in "
+        "place (WP4/A6): PATH is the right question by design — it must NOT "
+        "resolve the Hermes-managed uv here — and the result is immediately "
+        "passed through accept_operator_path(component='uv'), which rejects any "
+        "path that aliases a Hermes-managed root (realpath/normcase, symlink/"
+        "junction) unless its provenance marker verifies. Behavior covered by "
+        "test_a6_managed_resolution.test_probe_operator_uv_rejects_managed_alias "
+        "and test_uv_bootstrap.test_ensure_uv_prefers_operator_managed_uv."
+    ),
 }
 
 

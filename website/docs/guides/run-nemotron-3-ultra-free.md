@@ -46,6 +46,8 @@ Prefer the terminal?
 
 ### 1. Install Hermes Agent
 
+Install `uv` first — the installer uses your operator-installed `uv` and won't auto-download it (`pipx install uv` / `brew install uv` on macOS/Linux/WSL2; `winget install astral-sh.uv` on Windows; Android/Termux needs no `uv`). Then:
+
 On macOS/Linux/WSL2/Android, run
 
 ```bash

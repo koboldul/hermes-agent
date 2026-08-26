@@ -191,6 +191,7 @@ class LSPClient:
         workspace_root: str,
         command: List[str],
         env: Optional[Dict[str, str]] = None,
+        env_policy: Optional[Any] = None,
         cwd: Optional[str] = None,
         initialization_options: Optional[Dict[str, Any]] = None,
         seed_diagnostics_on_first_push: bool = False,
@@ -198,7 +199,11 @@ class LSPClient:
         self.server_id = server_id
         self.workspace_root = workspace_root
         self._command = list(command)
+        # ``env`` is treated as declared *additions* on top of the restricted,
+        # empty-allowlist base built from ``env_policy`` — never a merge onto
+        # ``os.environ`` (SEC-AUDIT-002).  Secret-named additions are dropped.
         self._env = env
+        self._env_policy = env_policy
         self._cwd = cwd or workspace_root
         self._init_options = initialization_options or {}
         self._seed_first_push = seed_diagnostics_on_first_push
@@ -305,9 +310,22 @@ class LSPClient:
         return cmd
 
     async def _spawn(self) -> None:
-        env = dict(os.environ)
+        # SEC-AUDIT-002: build the language-server environment from an empty
+        # allowlist (restricted builder), NOT from ``os.environ``.  Declared
+        # per-server ``env`` additions are merged on top, with secret-named
+        # keys dropped so an override cannot re-introduce a credential.
+        from agent.lsp.restricted_env import (
+            LSPEnvPolicy,
+            build_lsp_process_env,
+            is_secret_name,
+        )
+
+        policy = self._env_policy if isinstance(self._env_policy, LSPEnvPolicy) else LSPEnvPolicy()
+        env = build_lsp_process_env(policy)
         if self._env:
-            env.update(self._env)
+            for key, value in self._env.items():
+                if key and value is not None and not is_secret_name(key):
+                    env[str(key)] = str(value)
 
         cmd = self._command
         if sys.platform == "win32":

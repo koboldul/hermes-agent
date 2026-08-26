@@ -641,6 +641,23 @@ def _ensure_sherpa_model(root: Optional[Path] = None) -> Path:
     target = root / _SHERPA_KWS_MODEL_DIR
     if (target / "tokens.txt").exists():
         return target
+
+    # Supply-chain (WP4): downloading + extracting the model archive is an
+    # unverified mutable fetch. An already-present model (above) is used in
+    # place; the NEW download fails closed under the secure default unless the
+    # operator opts in scoped.
+    from hermes_cli.supply_chain.gate import compat_opt_in
+
+    if not compat_opt_in("wake-word-model"):
+        raise RuntimeError(
+            "Wake-word model download is disabled by default (supply-chain "
+            "enforce): it fetches and extracts an unverified model archive. "
+            "Pre-place the sherpa KWS model under $HERMES_HOME/cache/wakewords/, "
+            "or allow it in config: security.supply_chain."
+            'allow_unverified_components: ["wake-word-model"]. '
+            "See docs/security/supply-chain-migration.md."
+        )
+
     import tarfile
     import urllib.request
 

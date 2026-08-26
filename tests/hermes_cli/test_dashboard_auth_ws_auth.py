@@ -113,13 +113,45 @@ def _logged_in(client: TestClient) -> None:
 class TestWsTicketEndpoint:
     def test_authenticated_session_can_mint(self, gated_app):
         _logged_in(gated_app)
-        r = gated_app.post("/api/auth/ws-ticket")
+        # POST /api/auth/ws-ticket is a cookie-authenticated unsafe request, so
+        # the CSRF owner requires an exact same-origin match + the session-bound
+        # token (fetched from the authenticated /api/auth/csrf endpoint).
+        csrf = gated_app.get("/api/auth/csrf").json()["csrf_token"]
+        r = gated_app.post(
+            "/api/auth/ws-ticket",
+            headers={
+                "origin": "https://fly-app.fly.dev",
+                "X-Hermes-CSRF-Token": csrf,
+            },
+        )
         assert r.status_code == 200
         body = r.json()
         assert "ticket" in body
         assert isinstance(body["ticket"], str)
         assert len(body["ticket"]) >= 32
         assert body["ttl_seconds"] == 30
+
+    def test_missing_csrf_is_rejected(self, gated_app):
+        """A cookie-authenticated ws-ticket mint with no CSRF token is 403."""
+        _logged_in(gated_app)
+        r = gated_app.post(
+            "/api/auth/ws-ticket",
+            headers={"origin": "https://fly-app.fly.dev"},
+        )
+        assert r.status_code == 403
+
+    def test_cross_origin_mint_is_rejected(self, gated_app):
+        """A valid token from a foreign origin still fails the exact-origin gate."""
+        _logged_in(gated_app)
+        csrf = gated_app.get("/api/auth/csrf").json()["csrf_token"]
+        r = gated_app.post(
+            "/api/auth/ws-ticket",
+            headers={
+                "origin": "https://evil.example.com",
+                "X-Hermes-CSRF-Token": csrf,
+            },
+        )
+        assert r.status_code == 403
 
     def test_unauthenticated_returns_401_or_redirect(self, gated_app):
         r = gated_app.post("/api/auth/ws-ticket", follow_redirects=False)

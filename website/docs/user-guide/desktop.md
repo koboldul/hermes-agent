@@ -92,6 +92,21 @@ Explore and preview the working directory without leaving the app — useful for
 
 The **Artifacts** view collects what your sessions generate — **images, files, and links** — into one searchable, browsable gallery. Open it from the sidebar, the command palette (**Artifacts — Browse generated outputs**), or a `nav.artifacts` shortcut you bind yourself. It indexes recent session outputs automatically; every artifact shows which session produced it with a jump back to that chat, and images and files open in a preview with download / open-in-browser / copy actions.
 
+:::warning Link and social-preview privacy in current releases
+Rendering an unlabelled HTTP(S) link can automatically request its title or
+favicon from the Desktop main process. This discloses your IP address and
+timing to the destination and may follow page-controlled destinations that
+reach local or private services. Supported Instagram, TikTok, and Twitter
+embeds also load the provider's remote script in the privileged application
+renderer.
+
+Until the fixed release is installed, avoid rendering untrusted bare links and
+interactive social embeds, or run Desktop with restricted network egress. The
+planned secure behavior is no network request on render, explicit title/favicon
+activation through a private-address-blocking main-process policy, and inert
+social links unless a separately isolated guest is explicitly activated.
+:::
+
 ### Windows, tabs & panes
 
 The app is built for working on several things at once:

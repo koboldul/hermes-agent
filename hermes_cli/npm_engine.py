@@ -199,6 +199,25 @@ def upgrade_managed_npm(
                 file=sys.stderr,
             )
         return False
+    # Supply-chain gate (WP4): a semver-range npm upgrade pulls an unpinned
+    # version from the registry. Disabled by default; the current npm is
+    # preserved (rollback rule). Requires an explicit operator opt-in.
+    try:
+        from hermes_cli.supply_chain.gate import compat_opt_in
+
+        _npm_compat = compat_opt_in("npm")
+    except Exception:
+        _npm_compat = False
+    if not _npm_compat:
+        if not quiet:
+            print(
+                "  ⚠ skipped: managed npm upgrade is disabled by default "
+                "(supply-chain enforce); the current npm is preserved. Allow it "
+                "in config: security.supply_chain.allow_unverified_components: "
+                "[\"npm\"].",
+                file=sys.stderr,
+            )
+        return False
     try:
         # A temp cwd keeps the checkout's .npmrc (engine-strict, min-release-age)
         # from applying to the upgrade itself.
@@ -265,8 +284,9 @@ def _print_manual_fix(npm: str, npm_range: str, actual: str | None) -> None:
         f"\n✗ {have}does not satisfy the range this project requires: {npm_range}\n"
         f"  Resolved npm: {npm}\n"
         "  Hermes could not provision its own Node.js runtime and never\n"
-        "  modifies a system/nvm/brew/Nix npm. Upgrade yours yourself with:\n"
-        f'      npm install -g npm@"{npm_range}"',
+        "  modifies a system/nvm/brew/Nix npm. Upgrade yours with the\n"
+        "  digest-pinned bootstrap (verifies the exact tarball before install):\n"
+        "      node scripts/ci/install-npm-pinned.mjs",
         file=sys.stderr,
     )
 

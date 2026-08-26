@@ -527,12 +527,18 @@ from hermes_cli.memory_oauth import router as _memory_oauth_router  # noqa: E402
 app.include_router(_memory_oauth_router)
 
 # ---------------------------------------------------------------------------
-# Session token for protecting sensitive endpoints (reveal).
+# Service session token for trusted non-browser / headless callers.
 # The desktop shell mints the token and injects it via
 # HERMES_DASHBOARD_SESSION_TOKEN so its main process can authenticate the
 # /api calls it makes on the user's behalf; otherwise we generate one fresh
-# on every server start. Either way it dies when the process exits and is
-# injected into the SPA HTML so only the legitimate web UI can use it.
+# on every server start. It dies when the process exits.
+#
+# SEC-AUDIT-001: this token is NEVER injected into the browser SPA any more.
+# It authenticates only trusted service callers that present it in the
+# ``X-Hermes-Session-Token`` header (Desktop main process, headless ``serve``
+# clients). Browser sessions authenticate by cookie — provider OAuth/password
+# in gated mode, or the loopback local-browser bootstrap cookie — so a random
+# (non-seeded) token is never disclosed and is effectively unusable.
 # ---------------------------------------------------------------------------
 
 
@@ -575,16 +581,17 @@ _reveal_timestamps: List[float] = []
 _REVEAL_MAX_PER_WINDOW = 5
 _REVEAL_WINDOW_SECONDS = 30
 
-# CORS: restrict to localhost origins only.  The web UI is intended to run
-# locally; binding to 0.0.0.0 with allow_origins=["*"] would let any website
-# read/modify config and secrets.
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# CORS: exact-origin credentialed policy (SEC-AUDIT-001 / plan §8). The old
+# ``allow_origin_regex`` accepted ANY localhost port, so ``localhost:3000`` (a
+# hostile page or a stray dev server) was treated as same-site and could make
+# credentialed reads. We now echo ``Access-Control-Allow-Origin`` ONLY for an
+# exact match of the dashboard's own canonical origin — the request's validated
+# ``scheme://host:port`` (or the declared ``dashboard.public_url``), plus any
+# operator-declared ``dashboard.allowed_browser_origins`` (validated) for
+# genuine dev / split-origin deploys. Different ports are different origins and
+# are refused. Credentialed CORS requires an exact origin (never ``*``), so this
+# is implemented as a small middleware rather than the wildcard-friendly
+# ``CORSMiddleware``. See ``_cors_middleware`` below (registered outermost).
 
 # ---------------------------------------------------------------------------
 # Endpoints that do NOT require the session token.  Everything else under
@@ -640,21 +647,20 @@ def _has_valid_query_token(request: Request, path: str) -> bool:
 def _require_token(request: Request) -> None:
     """Authorize a sensitive endpoint, raising 401 if the caller isn't allowed.
 
-    Two auth schemes protect the dashboard, exactly one active per bind:
+    Three credentials can satisfy this (SEC-AUDIT-001):
 
-    * **Loopback / ``--insecure`` mode** (``auth_required`` False): the
-      ephemeral ``_SESSION_TOKEN`` is injected into the SPA HTML and echoed
-      back via ``X-Hermes-Session-Token`` (or the legacy ``Bearer`` header).
-      Validate it here.
-    * **Gated / OAuth mode** (``auth_required`` True): ``_SESSION_TOKEN`` is
-      NOT injected (the SPA authenticates with a session cookie), so there is
-      no token to check. The ``gated_auth_middleware`` has already verified the
-      cookie before the request reached this handler — any non-public ``/api/``
-      route it lets through carries a verified ``request.state.session``. The
-      legacy ``auth_middleware`` likewise short-circuits in this mode. Requiring
-      the (absent) token here would 401 every cookie-authenticated request,
-      making plugin install/enable/disable and the other ``_require_token``
-      endpoints permanently unreachable behind the gate. Defer to the gate.
+    * **Trusted service token** — a non-browser/headless caller (Desktop main
+      process, ``serve`` client) presenting the seeded ``_SESSION_TOKEN`` in
+      ``X-Hermes-Session-Token`` (or legacy ``Bearer``). Never injected into
+      the SPA any more.
+    * **Local-browser session** (``auth_required`` False, loopback) — a
+      verified ``local-loopback`` ``Session`` principal attached from the
+      HttpOnly bootstrap cookie by ``_local_browser_session_middleware``.
+    * **Gated / OAuth mode** (``auth_required`` True) — the SPA authenticates
+      with a provider session cookie; ``gated_auth_middleware`` verifies it and
+      attaches ``request.state.session`` before the handler runs. Requiring the
+      (absent) service token here would 401 every cookie-authenticated request,
+      so we defer to the attached principal.
     """
     if getattr(request.app.state, "auth_required", False):
         # Gate is authoritative. It attaches ``request.state.session`` on
@@ -663,6 +669,12 @@ def _require_token(request: Request) -> None:
         if getattr(request.state, "session", None) is not None:
             return
         raise HTTPException(status_code=401, detail="Unauthorized")
+    # Loopback local-browser mode: a verified local ``Session`` principal
+    # (attached by ``_local_browser_session_middleware`` from the HttpOnly
+    # cookie) is a first-class credential alongside the trusted service-token
+    # header. Either is sufficient; a request that carries neither is 401'd.
+    if getattr(request.state, "session", None) is not None:
+        return
     if not _has_valid_session_token(request):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
@@ -698,6 +710,446 @@ def _dashboard_public_hosts() -> frozenset[str]:
     if not hostname:
         return frozenset()
     return frozenset({hostname.lower()})
+
+
+# ---------------------------------------------------------------------------
+# Local browser bootstrap authentication (SEC-AUDIT-001).
+#
+# In the loopback browser-dashboard mode the SPA no longer receives a reusable
+# token in its HTML. Instead the browser proves possession of a one-time
+# terminal-displayed bootstrap code, exchanges it for an opaque HttpOnly
+# session cookie, and thereafter authenticates by cookie + a session-bound
+# anti-CSRF token. ``app.state.local_browser_auth`` marks that mode; it is set
+# by ``start_server`` only for a loopback SPA bind (never headless ``serve``,
+# never a gated/OAuth bind).
+# ---------------------------------------------------------------------------
+
+_LOCAL_PROVIDER = "local-loopback"
+_LOCAL_BOOTSTRAP_PATH = "/api/auth/local/bootstrap"
+_LOCAL_SESSION_COOKIE = "hermes_local_session"
+_CSRF_HEADER_NAME = "X-Hermes-CSRF-Token"
+_UNSAFE_METHODS: frozenset = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+
+def _local_browser_auth_active() -> bool:
+    """True when the loopback local-browser bootstrap mode is engaged.
+
+    Mutually exclusive with the OAuth/password gate: a gated bind runs the
+    provider flow instead. Headless ``serve`` never sets the flag (no SPA).
+    """
+    if getattr(app.state, "auth_required", False):
+        return False
+    return bool(getattr(app.state, "local_browser_auth", False))
+
+
+def _browser_session_auth_active() -> bool:
+    """True when a browser proves identity via a dashboard session (not a
+    static token): either the OAuth/password gate or the local-browser
+    bootstrap mode. WS-ticket + CSRF paths key off this so a single helper —
+    not a scatter of ``auth_required`` checks — decides the browser surface.
+    """
+    return bool(getattr(app.state, "auth_required", False)) or _local_browser_auth_active()
+
+
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def _canonical_origin(scheme: str, host: str, port) -> str:
+    """Return a normalized ``scheme://host[:port]`` with default ports stripped.
+
+    IPv6 hosts are bracketed; the default port for the scheme (80/443) is
+    omitted so ``https://h`` and ``https://h:443`` compare equal.
+    """
+    scheme = (scheme or "").lower()
+    host = (host or "").lower()
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+    hostpart = f"[{host}]" if ":" in host else host
+    default = _DEFAULT_PORTS.get(scheme)
+    if port and port != default:
+        return f"{scheme}://{hostpart}:{port}"
+    return f"{scheme}://{hostpart}"
+
+
+def _authority_port(authority: str):
+    """Return the integer port from a Host authority, or None for the default."""
+    value = (authority or "").strip()
+    if not value:
+        return None
+    if value.startswith("["):
+        close = value.find("]")
+        if close == -1:
+            return None
+        rest = value[close + 1:]
+        if rest.startswith(":") and rest[1:].isdigit():
+            return int(rest[1:])
+        return None
+    if value.count(":") == 1:
+        _h, port = value.rsplit(":", 1)
+        if port.isdigit():
+            return int(port)
+    return None
+
+
+def _normalise_origin_header(origin: str):
+    """Return the canonical form of an ``Origin`` value, or None if unusable.
+
+    ``null``, malformed, and non-web (file://, app://) origins return None so
+    every caller fails closed on them.
+    """
+    if not origin or origin == "null":
+        return None
+    try:
+        parsed = urllib.parse.urlparse(origin)
+    except ValueError:
+        return None
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return None
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    return _canonical_origin(parsed.scheme, parsed.hostname, port)
+
+
+def _declared_public_origin():
+    """Canonical origin from a validated ``dashboard.public_url``, or None.
+
+    When an operator declares the canonical browser-facing URL, that URL is THE
+    accepted origin: a request arriving directly at a reverse-proxy backend
+    cannot impersonate it, because its own (backend) origin will not match.
+    """
+    try:
+        from hermes_cli.dashboard_auth.prefix import resolve_public_url
+
+        public_url = resolve_public_url()
+    except Exception:
+        public_url = ""
+    if not public_url:
+        return None
+    parsed = urllib.parse.urlparse(public_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return None
+    return _canonical_origin(parsed.scheme, parsed.hostname, parsed.port)
+
+
+def _accepted_origin_for(scheme: str, host_authority: str):
+    """Canonical origin the browser must be on for the given request authority.
+
+    Precedence (per the remediation plan):
+
+    * a validated ``dashboard.public_url`` — the sole accepted origin, so a
+      direct-to-backend request cannot spoof the proxied public origin; else
+    * the request's own (Host-header-validated) ``scheme://host[:port]``.
+
+    The Host header is validated by ``host_header_middleware`` before this
+    runs, and ``scheme`` honours ``X-Forwarded-Proto`` only under the trusted
+    ``proxy_headers`` config (gated mode). ``Forwarded`` / ``X-Forwarded-*``
+    are never consulted here otherwise.
+    """
+    public = _declared_public_origin()
+    if public is not None:
+        return public
+    host_only = _host_header_hostname(host_authority)
+    if not host_only:
+        return None
+    return _canonical_origin(scheme, host_only, _authority_port(host_authority))
+
+
+def _request_origin_accepted(request: Request) -> bool:
+    """Exact-origin check for a browser request (scheme + host + port).
+
+    A missing/``null``/malformed/cross-origin ``Origin`` fails closed. Because
+    ``localhost:3000`` and ``localhost:9119`` are different origins even though
+    cookies treat them as the same site, the full authority (including port)
+    must match — a hostile page on another localhost port is rejected.
+    """
+    origin = _normalise_origin_header(request.headers.get("origin", ""))
+    if origin is None:
+        return False
+    expected = _accepted_origin_for(
+        request.url.scheme, request.headers.get("host", "")
+    )
+    return expected is not None and origin == expected
+
+
+def _ws_origin_accepted(ws: "WebSocket") -> bool:
+    """Exact-origin check for a WebSocket upgrade (scheme + host + port).
+
+    Maps the ``ws``/``wss`` handshake scheme to ``http``/``https`` and compares
+    the ``Origin`` against the request-authority origin. Only meaningful when
+    an ``Origin`` header is present (browsers always send one; server-spawned
+    children do not — the caller handles that case).
+    """
+    origin = _normalise_origin_header(ws.headers.get("origin", ""))
+    if origin is None:
+        return False
+    ws_scheme = "https" if str(getattr(ws.url, "scheme", "")).lower() == "wss" else "http"
+    expected = _accepted_origin_for(ws_scheme, ws.headers.get("host", ""))
+    return expected is not None and origin == expected
+
+
+def _load_configured_browser_origins() -> frozenset:
+    """Read + validate ``dashboard.allowed_browser_origins`` from config.
+
+    A list of exact ``scheme://host[:port]`` origins an operator may declare for
+    genuine split-origin / dev deployments (the SPA served from a different
+    origin than the API). Each entry is normalized; malformed entries drop.
+    Empty by default — the dashboard's own origin and a declared ``public_url``
+    are always allowed without this.
+    """
+    try:
+        from hermes_cli.dashboard_auth.prefix import _load_dashboard_section
+
+        section = _load_dashboard_section()
+    except Exception:
+        return frozenset()
+    raw = section.get("allowed_browser_origins") if isinstance(section, dict) else None
+    if not isinstance(raw, (list, tuple)):
+        return frozenset()
+    out = set()
+    for entry in raw:
+        norm = _normalise_origin_header(str(entry))
+        if norm:
+            out.add(norm)
+    return frozenset(out)
+
+
+def _configured_browser_origins() -> frozenset:
+    """Cached (startup) configured browser origins, or a live read as fallback."""
+    cached = getattr(app.state, "allowed_browser_origins", None)
+    if cached is not None:
+        return cached
+    return _load_configured_browser_origins()
+
+
+def _cors_origin_allowed(request: Request, origin: str) -> bool:
+    """True when ``origin`` is exactly the dashboard's own origin, the declared
+    public origin, or an operator-configured browser origin.
+
+    Not "any localhost": a different port is a different origin and is refused,
+    so a hostile ``127.0.0.1:3000`` page gets no credentialed CORS grant.
+    """
+    norm = _normalise_origin_header(origin)
+    if norm is None:
+        return False
+    # Fast path: the request's own same-origin (no config read).
+    host_authority = request.headers.get("host", "")
+    host_only = _host_header_hostname(host_authority)
+    if host_only:
+        same = _canonical_origin(
+            request.url.scheme, host_only, _authority_port(host_authority)
+        )
+        if norm == same:
+            return True
+    # Cross-origin: consult the declared public_url + configured dev origins.
+    pub = _declared_public_origin()
+    if pub and norm == pub:
+        return True
+    return norm in _configured_browser_origins()
+
+
+def _fetch_metadata_same_origin(request: Request) -> bool:
+    """Require ``Sec-Fetch-Site: same-origin`` (fail closed if absent/other).
+
+    Modern browsers stamp this on every request the SPA issues to its own
+    origin. A cross-site or missing value on the privileged bootstrap exchange
+    is rejected — the exchange is only ever driven by the dashboard's own SPA.
+    """
+    return request.headers.get("sec-fetch-site", "").lower() == "same-origin"
+
+
+def _same_origin_request(request: Request) -> bool:
+    """Best-effort same-origin gate for authenticated GETs.
+
+    A different localhost *port* is a different origin but the SAME cookie
+    site, so ``SameSite=Strict`` alone does NOT stop a hostile ``127.0.0.1:3000``
+    page from carrying the victim's cookie to ``127.0.0.1:9119``. Enforce a
+    real same-origin signal:
+
+    * ``Sec-Fetch-Site`` present → must be ``same-origin``;
+    * else ``Origin`` present → must be an exact accepted origin;
+    * else (ancient browser, same-origin GET with neither header) → allow, the
+      ``SameSite`` cookie already limited it to same-site and a cross-origin
+      *read* requires a CORS fetch that would have sent ``Origin``.
+    """
+    sfs = request.headers.get("sec-fetch-site", "").lower()
+    if sfs:
+        return sfs == "same-origin"
+    if request.headers.get("origin"):
+        return _request_origin_accepted(request)
+    return True
+
+
+def _make_local_session_principal(session_id: str):
+    """Build the normalized local ``Session`` principal for a valid cookie.
+
+    Carries provider ``local-loopback`` and no secret material — the opaque
+    session id stays in the request state, never on the principal handed to
+    route handlers or the renderer.
+    """
+    from hermes_cli.dashboard_auth.base import Session
+    from hermes_cli.dashboard_auth import local_browser
+
+    deadline = local_browser.session_absolute_deadline(session_id) or 0
+    return Session(
+        user_id="local",
+        email="",
+        display_name="Local",
+        org_id="",
+        provider=_LOCAL_PROVIDER,
+        expires_at=int(deadline),
+        access_token="",
+        refresh_token="",
+    )
+
+
+def _read_local_session_cookie(request: Request) -> str:
+    return request.cookies.get(_LOCAL_SESSION_COOKIE, "") or ""
+
+
+def _cookie_secure_and_path(request: Request) -> tuple[bool, str]:
+    """Decide the local-session cookie ``Secure`` flag and ``Path``.
+
+    Trust ONLY the validated ``dashboard.public_url`` (a trusted-proxy /
+    canonical-origin declaration) or the direct request — never spoofable
+    ``Forwarded`` / ``X-Forwarded-*`` headers:
+
+    * ``public_url`` declared → ``Secure`` from its scheme (so an HTTPS public
+      URL in front of an HTTP loopback backend still marks the cookie Secure)
+      and ``Path`` from its path prefix;
+    * otherwise → ``Secure`` from the direct connection scheme
+      (``request.url.scheme``; in loopback local-browser mode ``proxy_headers``
+      is off, so this is the real scheme and cannot be flipped by a spoofed
+      ``X-Forwarded-Proto``) and ``Path=/`` (a raw ``X-Forwarded-Prefix`` from
+      an untrusted peer is ignored).
+    """
+    try:
+        from hermes_cli.dashboard_auth.prefix import resolve_public_url, normalise_prefix
+
+        public_url = resolve_public_url()
+    except Exception:
+        public_url = ""
+    if public_url:
+        parsed = urllib.parse.urlparse(public_url)
+        secure = parsed.scheme == "https"
+        prefix = normalise_prefix(parsed.path)
+        return secure, (prefix or "/")
+    return (request.url.scheme == "https"), "/"
+
+
+def _set_local_session_cookie(response, session_id: str, request: Request) -> None:
+    """Write the host-only local-session cookie.
+
+    Host-only (no ``Domain``), ``HttpOnly``, ``SameSite=Strict``, and ``Secure``
+    + ``Path`` decided by :func:`_cookie_secure_and_path` (validated public_url
+    or the direct request — never spoofable forwarded headers).
+    """
+    secure, path = _cookie_secure_and_path(request)
+    response.set_cookie(
+        _LOCAL_SESSION_COOKIE,
+        session_id,
+        max_age=None,  # session cookie; server-side store bounds real lifetime
+        path=path,
+        httponly=True,
+        samesite="strict",
+        secure=secure,
+    )
+
+
+def _clear_local_session_cookie(response, request: Request) -> None:
+    secure, path = _cookie_secure_and_path(request)
+    response.set_cookie(
+        _LOCAL_SESSION_COOKIE,
+        "",
+        max_age=0,
+        path=path,
+        httponly=True,
+        samesite="strict",
+        secure=secure,
+    )
+
+
+def _service_or_bearer_caller(request: Request) -> bool:
+    """True for an explicit per-request credential (bearer seam or the trusted
+    service-token header). Such callers are NOT subject to browser CSRF."""
+    if getattr(request.state, "token_authenticated", False):
+        return True
+    if _has_valid_session_token(request):
+        return True
+    return False
+
+
+def _has_provider_session_cookie(request: Request) -> bool:
+    """True if the request carries ANY provider (OAuth/password) session cookie.
+
+    Presence of the access, refresh, provider-hint, OR stable CSRF cookie means
+    the gate will treat this as a cookie-authenticated provider session — even
+    in the *refresh-only* case where the access cookie is expired/absent and
+    the gate rotates a fresh one from the refresh cookie. Classifying on cookie
+    presence (not on the access cookie the request happens to carry) is what
+    closes the refresh-only CSRF bypass (SEC-AUDIT-001 Alert 1).
+    """
+    try:
+        from hermes_cli.dashboard_auth.cookies import (
+            read_csrf_cookie,
+            read_session_cookies,
+            read_session_provider,
+        )
+
+        access_token, refresh_token = read_session_cookies(request)
+        return bool(
+            access_token
+            or refresh_token
+            or read_session_provider(request)
+            or read_csrf_cookie(request)
+        )
+    except Exception:
+        return False
+
+
+def _is_cookie_authenticated(request: Request) -> bool:
+    """True when the request authenticates by a dashboard session cookie (local
+    OR provider) and MUST therefore satisfy the CSRF owner.
+
+    Service-token-header and bearer callers return False (they carry an
+    explicit per-request credential and are exempt).
+    """
+    if _service_or_bearer_caller(request):
+        return False
+    if getattr(request.state, "local_session_id", "") or _read_local_session_cookie(request):
+        return True
+    return _has_provider_session_cookie(request)
+
+
+def _cookie_csrf_identity(request: Request):
+    """Return the stable identity a cookie-authenticated request's CSRF token
+    binds to, or ``None`` when no stable identity is available yet.
+
+    * local session → the opaque local-session id from the HttpOnly cookie
+      (stable for the session's life);
+    * provider (OAuth/password) session → the stable ``hermes_session_csrf``
+      cookie value, minted by ``GET /api/auth/csrf`` and NEVER rotated, so the
+      derived anti-CSRF token survives access/refresh-token rotation. Returns
+      ``None`` for a provider session that has not yet minted its CSRF cookie
+      (the CSRF owner then rejects, and the SPA fetches ``/api/auth/csrf`` to
+      mint it and retries).
+
+    Service-token-header and bearer callers return ``None`` — exempt. Read
+    directly from cookies (not ``request.state.session``) so this is correct on
+    gate-public routes like ``/auth/logout`` and on refresh-only requests.
+    """
+    if _service_or_bearer_caller(request):
+        return None
+    local_sid = getattr(request.state, "local_session_id", "") or _read_local_session_cookie(request)
+    if local_sid:
+        return local_sid
+    try:
+        from hermes_cli.dashboard_auth.cookies import read_csrf_cookie
+
+        return read_csrf_cookie(request) or None
+    except Exception:
+        return None
 
 
 def should_require_auth(host: str, allow_public: bool = False) -> bool:
@@ -918,11 +1370,60 @@ async def _plugin_api_runtime_gate(request: Request, call_next):
 
 
 # ---------------------------------------------------------------------------
+# CSRF owner for cookie-authenticated dashboard requests.
+#
+# Registered before ``_dashboard_auth_gate`` so it runs AFTER every auth
+# middleware has attached ``request.state.session`` — i.e. it is the innermost
+# auth layer before the route. It enforces an exact same-origin match and a
+# session-bound anti-CSRF token on every unsafe (state-changing) request that
+# authenticated via the local-browser session cookie. Service-token-header and
+# bearer callers carry an explicit per-request credential and are exempt (they
+# never present a session cookie). The token derivation is generic
+# (``local_browser.csrf_token_for_value``) so provider sessions can adopt it
+# without a second mechanism.
+# ---------------------------------------------------------------------------
+
+
+@app.middleware("http")
+async def _csrf_middleware(request: Request, call_next):
+    if request.method in _UNSAFE_METHODS and _is_cookie_authenticated(request):
+        # Cookie-authenticated (local OR provider, including refresh-only)
+        # unsafe request: require an exact same-origin match AND the
+        # session-bound anti-CSRF token. The classification is by cookie
+        # PRESENCE (``_is_cookie_authenticated``), so a refresh-only request
+        # whose access cookie is absent cannot slip past the check. Service-
+        # header / bearer callers are exempt (classifier returns False). This
+        # is the single CSRF owner for every cookie session.
+        if not _request_origin_accepted(request):
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "CSRF origin check failed"},
+            )
+        from hermes_cli.dashboard_auth.local_browser import (
+            verify_csrf_for_value,
+        )
+
+        identity = _cookie_csrf_identity(request)
+        presented = request.headers.get(_CSRF_HEADER_NAME, "")
+        # ``identity is None`` means a provider session that has not minted its
+        # stable CSRF cookie yet — reject before the route runs; the gate has
+        # already applied any refresh/cookie rotation on this response, so the
+        # SPA can GET /api/auth/csrf (mint the cookie + token) and retry.
+        if identity is None or not verify_csrf_for_value(identity, presented):
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "CSRF token invalid"},
+            )
+    return await call_next(request)
+
+
+# ---------------------------------------------------------------------------
 # Dashboard OAuth auth gate — engaged only when start_server flags the
 # bind as non-loopback-without-insecure.  No-op pass-through in loopback
-# mode so the legacy auth_middleware (below) handles those binds via
-# the injected ``_SESSION_TOKEN``.  Registered between host_header and
-# auth_middleware so the order is: host check → cookie auth → token auth.
+# mode so ``auth_middleware`` (below) handles those binds via the local
+# session cookie or the trusted service-token header.  Registered between
+# host_header and auth_middleware so the order is: host check → cookie auth →
+# token auth.
 # ---------------------------------------------------------------------------
 
 
@@ -934,26 +1435,176 @@ async def _dashboard_auth_gate(request: Request, call_next):
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
-    """Require the session token on all /api/ routes except the public list."""
+    """Authorize /api/ routes: local session cookie OR trusted service token."""
     # A request already authenticated by the token-auth seam (a service caller
     # presenting a bearer token on a registered token route) carries
     # ``token_authenticated`` — never bounce it through the cookie/session gate.
     if getattr(request.state, "token_authenticated", False):
         return await call_next(request)
     # When the OAuth gate is active, cookie-based auth (gated_auth_middleware
-    # above) is authoritative.  The legacy _SESSION_TOKEN path is loopback-only
-    # and is skipped here so the gate's session attachment isn't overridden.
+    # above) is authoritative; skip here so its session attachment stands.
     if getattr(request.app.state, "auth_required", False):
         return await call_next(request)
     path = request.url.path
     is_mcp_oauth_callback = path.startswith("/api/mcp/oauth/callback/")
-    if path.startswith("/api/") and path not in _PUBLIC_API_PATHS and not is_mcp_oauth_callback:
-        if not _has_valid_session_token(request) and not _has_valid_query_token(request, path):
+    # The pre-auth bootstrap exchange is reachable without a session (it IS
+    # how a browser obtains one). It performs its own Host/Origin/Fetch-Metadata
+    # checks and grants no direct API access — see the handler.
+    is_local_bootstrap = path == _LOCAL_BOOTSTRAP_PATH
+    if (
+        path.startswith("/api/")
+        and path not in _PUBLIC_API_PATHS
+        and not is_mcp_oauth_callback
+        and not is_local_bootstrap
+    ):
+        # A verified local-browser ``Session`` (attached from the HttpOnly
+        # cookie by ``_local_browser_session_middleware``) authenticates the
+        # request without the injected token, which is no longer served.
+        if (
+            getattr(request.state, "session", None) is None
+            and not _has_valid_session_token(request)
+            and not _has_valid_query_token(request, path)
+        ):
             return JSONResponse(
                 status_code=401,
                 content={"detail": "Unauthorized"},
             )
     return await call_next(request)
+
+
+@app.middleware("http")
+async def _local_browser_session_middleware(request: Request, call_next):
+    """Attach a verified local ``Session`` from the bootstrap cookie.
+
+    Active only in loopback local-browser mode. Validates the opaque HttpOnly
+    cookie against the digest-only store, refreshes the idle deadline, and
+    attaches a normalized ``local-loopback`` principal plus the opaque id
+    (kept in ``request.state``, never handed to route handlers or the
+    renderer). It does not itself reject — enforcement stays with
+    ``auth_middleware`` / ``_require_token`` — so this is a pure attach seam.
+
+    Registered after ``auth_middleware`` (so it runs BEFORE it, attaching the
+    session before the /api 401 check) and after ``_token_auth_seam`` (so a
+    bearer service caller is never shadowed by a local cookie).
+    """
+    if _local_browser_auth_active() and getattr(request.state, "session", None) is None:
+        sid = _read_local_session_cookie(request)
+        if sid:
+            from hermes_cli.dashboard_auth import local_browser
+
+            if local_browser.verify_session(sid):
+                request.state.local_session_id = sid
+                request.state.session = _make_local_session_principal(sid)
+    return await call_next(request)
+
+
+@app.post("/api/auth/local/bootstrap")
+async def local_bootstrap_exchange(request: Request):
+    """Exchange a one-time terminal bootstrap code for a local session cookie.
+
+    Public (pre-auth) but narrow: it grants no direct API access, only a
+    session cookie. Restricted to loopback local-browser mode — disabled for
+    headless ``serve``, non-loopback binds, and configured external auth. It
+    requires an accepted ``Host`` (host-header middleware), an exact trusted
+    ``Origin``, and same-origin Fetch Metadata; missing/``null``/malformed/
+    cross-origin values fail closed. Failed guesses are globally + per-client
+    rate limited and never consume a still-valid code.
+    """
+    if not _local_browser_auth_active():
+        raise HTTPException(status_code=404, detail="Not found")
+    if not _request_origin_accepted(request):
+        raise HTTPException(status_code=403, detail="Origin check failed")
+    if not _fetch_metadata_same_origin(request):
+        raise HTTPException(status_code=403, detail="Fetch metadata check failed")
+
+    from hermes_cli.dashboard_auth import local_browser
+
+    client_ip = request.client.host if request.client else ""
+    if local_browser.bootstrap_rate_limited(client_ip):
+        raise HTTPException(
+            status_code=429, detail="Too many bootstrap attempts. Try again shortly."
+        )
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    code = str(body.get("code", "") or "") if isinstance(body, dict) else ""
+    if not local_browser.consume_bootstrap_code(code, client_ip=client_ip):
+        raise HTTPException(
+            status_code=401, detail="Invalid or expired bootstrap code"
+        )
+    session_id, csrf_token = local_browser.create_session()
+    resp = JSONResponse({"ok": True, "csrf_token": csrf_token})
+    _set_local_session_cookie(resp, session_id, request)
+    return resp
+
+
+@app.get("/api/auth/csrf")
+async def local_csrf_token(request: Request):
+    """Return the session-bound anti-CSRF token for the current cookie session.
+
+    Authenticated + same-origin only. For a local session the token is derived
+    from the opaque session id. For a provider (OAuth/password) session it is
+    derived from a STABLE ``hermes_session_csrf`` cookie minted here on first
+    use and never rotated — so access/refresh-token rotation does not
+    invalidate an already-fetched anti-CSRF token. The token is always the
+    HMAC-derived value; the opaque cookie value is never exposed to JS.
+    """
+    sess = getattr(request.state, "session", None)
+    if sess is None:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if not _same_origin_request(request):
+        raise HTTPException(status_code=403, detail="Origin check failed")
+
+    from hermes_cli.dashboard_auth.local_browser import csrf_token_for_value
+
+    # Local browser session: the stable opaque session id is the identity.
+    if getattr(sess, "provider", "") == _LOCAL_PROVIDER:
+        sid = getattr(request.state, "local_session_id", "") or _read_local_session_cookie(request)
+        if not sid:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+        return {"csrf_token": csrf_token_for_value(sid)}
+
+    # Provider (OAuth/password) session: ensure the stable CSRF cookie exists,
+    # bind the token to it.
+    from hermes_cli.dashboard_auth.cookies import (
+        detect_https,
+        read_csrf_cookie,
+        set_csrf_cookie,
+    )
+    from hermes_cli.dashboard_auth.prefix import prefix_from_request
+
+    csrf_value = read_csrf_cookie(request)
+    mint = not csrf_value
+    if mint:
+        csrf_value = secrets.token_urlsafe(32)
+    resp = JSONResponse({"csrf_token": csrf_token_for_value(csrf_value)})
+    if mint:
+        set_csrf_cookie(
+            resp,
+            value=csrf_value,
+            use_https=detect_https(request),
+            prefix=prefix_from_request(request),
+        )
+    return resp
+
+
+@app.post("/api/auth/local/logout")
+async def local_logout(request: Request):
+    """Revoke the server-side local session, then clear the cookie.
+
+    A CSRF-protected unsafe request (``_csrf_middleware`` enforces the exact
+    origin + session-bound token before this handler runs). Idempotent: an
+    absent or already-revoked session still clears the cookie.
+    """
+    sid = getattr(request.state, "local_session_id", "") or _read_local_session_cookie(request)
+    if sid:
+        from hermes_cli.dashboard_auth import local_browser
+
+        local_browser.revoke_session(sid)
+    resp = JSONResponse({"ok": True})
+    _clear_local_session_cookie(resp, request)
+    return resp
 
 
 @app.middleware("http")
@@ -1049,6 +1700,63 @@ async def _dashboard_health_middleware(request: Request, call_next):
         raise
     if response.status_code >= 500:
         DASHBOARD_HEALTH.record_error(f"http_{response.status_code}", request.url.path)
+    return response
+
+
+_CORS_UNSAFE_REQUEST_HEADERS = "Authorization, Content-Type, X-Hermes-CSRF-Token, X-Hermes-Session-Token"
+_CORS_ALLOW_METHODS = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+
+
+@app.middleware("http")
+async def _cors_middleware(request: Request, call_next):
+    """Exact-origin credentialed CORS (SEC-AUDIT-001 / plan §8).
+
+    Registered last so it runs OUTERMOST — it answers preflight before any
+    auth/host layer. ``Access-Control-Allow-Origin`` is echoed ONLY for an
+    exact match of the dashboard's canonical origin (see
+    ``_cors_origin_allowed``); a different localhost port is a different origin
+    and is refused. Credentialed CORS never uses ``*``.
+    """
+    origin = request.headers.get("origin", "")
+    is_preflight = (
+        request.method == "OPTIONS"
+        and "access-control-request-method" in request.headers
+    )
+    if not origin:
+        # Same-origin or non-browser caller: no CORS headers needed. A
+        # preflight without an Origin is malformed; answer 400 rather than
+        # leak a permissive response.
+        if is_preflight:
+            return Response(status_code=400)
+        return await call_next(request)
+
+    allowed = _cors_origin_allowed(request, origin)
+    if is_preflight:
+        if not allowed:
+            return Response(status_code=403)
+        req_headers = request.headers.get(
+            "access-control-request-headers", _CORS_UNSAFE_REQUEST_HEADERS
+        )
+        return Response(
+            status_code=204,
+            headers={
+                "Access-Control-Allow-Origin": origin,
+                "Access-Control-Allow-Credentials": "true",
+                "Access-Control-Allow-Methods": _CORS_ALLOW_METHODS,
+                "Access-Control-Allow-Headers": req_headers,
+                "Access-Control-Max-Age": "600",
+                "Vary": "Origin",
+            },
+        )
+
+    response = await call_next(request)
+    if allowed:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        existing_vary = response.headers.get("Vary")
+        response.headers["Vary"] = (
+            f"{existing_vary}, Origin" if existing_vary and "Origin" not in existing_vary else (existing_vary or "Origin")
+        )
     return response
 
 
@@ -9687,7 +10395,10 @@ def _ensure_whatsapp_bridge_dependencies(bridge_dir: Path) -> None:
     timeout = env_int("WHATSAPP_NPM_INSTALL_TIMEOUT", 300)
     try:
         result = subprocess.run(
-            [npm, "install", "--silent"],
+            # A4: the WhatsApp bridge is a first-party package (committed lock,
+            # no first-party install script, pure-JS deps); --ignore-scripts is
+            # the complete guarantee no dependency runs arbitrary install code.
+            [npm, "install", "--silent", "--ignore-scripts"],
             cwd=str(bridge_dir),
             capture_output=True,
             text=True,
@@ -16255,6 +16966,17 @@ def _ws_host_origin_reason(ws: "WebSocket") -> Optional[str]:
         parsed.netloc, bound_host, trusted_public_hosts
     ):
         return f"origin_mismatch origin={origin} bound={bound_host}"
+
+    # Loopback browser mode: a hostile page on another localhost *port* is a
+    # different origin but the same host, so the host-only check above accepts
+    # it. Require an EXACT scheme/host/port origin match here so a victim's
+    # cookie on ``127.0.0.1:9119`` cannot be used to mint or consume a socket
+    # ticket from ``127.0.0.1:3000``. Server-spawned children send no Origin
+    # header (handled by the early ``if not origin`` return) so they are
+    # unaffected; only a browser (which always sends Origin) is held to the
+    # exact origin.
+    if _local_browser_auth_active() and not _ws_origin_accepted(ws):
+        return f"origin_exact_mismatch origin={origin} bound={bound_host}"
     return None
 
 
@@ -16284,6 +17006,8 @@ def _ws_auth_mode() -> str:
     """Short label for the active WS auth mode — logged on every connection."""
     if getattr(app.state, "auth_required", False):
         return "gated"
+    if _local_browser_auth_active():
+        return "local"
     bound_host = (getattr(app.state, "bound_host", "") or "").strip().lower()
     if bound_host and bound_host not in _LOOPBACK_HOSTS:
         return "insecure"
@@ -16321,9 +17045,15 @@ def _ws_auth_reason(ws: "WebSocket") -> tuple[Optional[str], str]:
     a peer authed, not just that it did.
 
     Loopback / ``--insecure``: legacy ``?token=<_SESSION_TOKEN>`` query
-    parameter, constant-time compared.
+    parameter, constant-time compared. This applies to the headless ``serve``
+    backend (Desktop parent → child service link) and the residual all-
+    interfaces insecure mode. In the loopback *browser* dashboard
+    (``local_browser_auth``) the token path is closed: browsers use single-use
+    tickets and server-spawned children use the internal credential, exactly
+    like gated mode.
 
-    Gated (public bind, no ``--insecure``): one of two credentials —
+    Gated (public bind, no ``--insecure``) OR loopback browser mode: one of
+    two credentials —
 
     * ``?ticket=<single-use>`` — a browser-minted, single-use, 30s-TTL ticket
       consumed against the dashboard-auth ticket store. This is what the SPA
@@ -16335,15 +17065,21 @@ def _ws_auth_reason(ws: "WebSocket") -> tuple[Optional[str], str]:
       injected into the SPA — see ``dashboard_auth.ws_tickets`` for the
       threat model.
 
-    The legacy ``?token=`` path is unconditionally rejected in gated mode
-    (the SPA bundle isn't carrying the token any longer, and a leaked
-    ``_SESSION_TOKEN`` must not grant WS access once the gate is engaged).
+    The legacy ``?token=`` path is unconditionally rejected in gated mode AND
+    in loopback browser mode (the SPA bundle isn't carrying the token any
+    longer, and a leaked ``_SESSION_TOKEN`` must not grant WS access there).
 
     Audit-logs the rejection so operators can debug "WS keeps closing"
     issues from the log.
     """
     auth_required = bool(getattr(app.state, "auth_required", False))
-    if auth_required:
+    # The loopback browser dashboard uses the same session-ticket WS auth as
+    # gated mode: browsers present single-use tickets minted after the local
+    # session cookie is attached, and server-spawned children present the
+    # multi-use internal credential. The legacy query token is not reachable
+    # by a browser there, so it is never accepted.
+    use_session_tickets = auth_required or _local_browser_auth_active()
+    if use_session_tickets:
         # Lazy import — keeps this function importable in test harnesses
         # that don't bring in the dashboard_auth layer.
         from hermes_cli.dashboard_auth.audit import AuditEvent, audit_log
@@ -16608,13 +17344,15 @@ def _resolve_client_ws_host() -> Optional[str]:
 def _build_gateway_ws_url() -> Optional[str]:
     """ws:// URL the PTY child should attach to for JSON-RPC gateway traffic.
 
-    Loopback / ``--insecure``: ``?token=<_SESSION_TOKEN>``.
+    Headless ``serve`` loopback / residual ``--insecure``: ``?token=<_SESSION_TOKEN>``
+    (server-to-child service link; the token is never browser-reachable there).
 
-    Gated mode: the legacy token path is rejected by ``_ws_auth_ok``, so the
-    server-spawned PTY child authenticates with the process-lifetime internal
-    credential (``?internal=``). It must NOT use a single-use browser ticket:
-    the child reads this URL once at startup and reuses it on every reconnect,
-    and a 30s-TTL ticket can expire before a slow cold boot even dials.
+    Gated mode AND loopback browser mode: the legacy token path is rejected by
+    ``_ws_auth_ok``, so the server-spawned PTY child authenticates with the
+    process-lifetime internal credential (``?internal=``). It must NOT use a
+    single-use browser ticket: the child reads this URL once at startup and
+    reuses it on every reconnect, and a 30s-TTL ticket can expire before a slow
+    cold boot even dials.
     """
     host = _resolve_client_ws_host()
     port = getattr(app.state, "bound_port", None)
@@ -16628,7 +17366,7 @@ def _build_gateway_ws_url() -> Optional[str]:
         else f"{host}:{port}"
     )
 
-    if getattr(app.state, "auth_required", False):
+    if _browser_session_auth_active():
         from hermes_cli.dashboard_auth.ws_tickets import internal_ws_credential
 
         qs = urllib.parse.urlencode({"internal": internal_ws_credential()})
@@ -16672,14 +17410,15 @@ async def _resolve_chat_argv_async(
 def _build_sidecar_url(channel: str) -> Optional[str]:
     """ws:// URL the PTY child should publish events to, or None when unbound.
 
-    Loopback / ``--insecure``: uses ``?token=<_SESSION_TOKEN>``.
+    Headless ``serve`` loopback / residual ``--insecure``: uses
+    ``?token=<_SESSION_TOKEN>`` (server-to-child service link).
 
-    Gated mode: authenticates with the process-lifetime internal credential
-    (``?internal=``), the same one ``_build_gateway_ws_url`` uses. The PTY
-    child is a server-spawned process we trust; the credential is multi-use
-    and never expires, so the child can reconnect ``/api/pub`` without a new
-    URL. (This previously minted a single-use 30s ticket, which meant the
-    child could not reconnect and could miss the window on a slow cold boot.)
+    Gated mode AND loopback browser mode: authenticates with the
+    process-lifetime internal credential (``?internal=``), the same one
+    ``_build_gateway_ws_url`` uses. The PTY child is a server-spawned process
+    we trust; the credential is multi-use and never expires, so the child can
+    reconnect ``/api/pub`` without a new URL. (A single-use 30s ticket would
+    prevent reconnect and could miss the window on a slow cold boot.)
     Connections authenticated this way are recorded under the
     ``server-internal`` identity in the audit log.
     """
@@ -16691,9 +17430,9 @@ def _build_sidecar_url(channel: str) -> Optional[str]:
 
     netloc = f"[{host}]:{port}" if ":" in host and not host.startswith("[") else f"{host}:{port}"
 
-    if getattr(app.state, "auth_required", False):
-        # Gated mode — use the internal credential so the WS upgrade survives
-        # _ws_auth_ok and the child can reconnect.
+    if _browser_session_auth_active():
+        # Gated / local-browser mode — use the internal credential so the WS
+        # upgrade survives _ws_auth_ok and the child can reconnect.
         from hermes_cli.dashboard_auth.ws_tickets import internal_ws_credential
 
         qs = urllib.parse.urlencode(
@@ -17737,9 +18476,10 @@ _IMMUTABLE_ASSET_CACHE_CONTROL = "public, max-age=31536000, immutable"
 def mount_spa(application: FastAPI):
     """Mount the built SPA. Falls back to index.html for client-side routing.
 
-    The session token is injected into index.html via a ``<script>`` tag so
-    the SPA can authenticate against protected API endpoints without a
-    separate (unauthenticated) token-dispensing endpoint.
+    SEC-AUDIT-001: no reusable credential is injected into ``index.html`` —
+    only non-secret feature flags. In gated mode the SPA authenticates with the
+    provider session cookie; in loopback mode it exchanges a one-time terminal
+    bootstrap code for a session cookie (see ``_serve_index``).
 
     When served behind a path-prefix reverse proxy (e.g.
     ``mission-control.tilos.com/hermes/*`` -> local Caddy -> :9119), the
@@ -17768,16 +18508,19 @@ def mount_spa(application: FastAPI):
     _index_path = WEB_DIST / "index.html"
 
     def _serve_index(prefix: str = ""):
-        """Return index.html with the session token + base-path injected.
+        """Return index.html with only non-secret feature flags injected.
 
         ``prefix`` is the normalised ``X-Forwarded-Prefix`` (e.g. ``/hermes``)
         or empty string when served at root.
 
-        When the OAuth auth gate is active (``app.state.auth_required``),
-        the legacy ``_SESSION_TOKEN`` is NOT injected — the SPA reads
-        identity from ``/api/auth/me`` over cookie auth instead.  The
-        ``__HERMES_AUTH_REQUIRED__`` flag lets the SPA pick the right
-        auth scheme for /api/pty and /api/ws (ticket vs token).
+        SEC-AUDIT-001: no reusable credential is ever injected. In gated mode
+        (``app.state.auth_required``) the SPA authenticates with the provider
+        session cookie and reads identity from ``/api/auth/me``. In loopback
+        mode (``__HERMES_LOCAL_BROWSER_AUTH__``) the SPA renders a
+        bootstrap-code form, exchanges the terminal-displayed code for a local
+        session cookie, and authenticates by cookie + anti-CSRF token
+        thereafter. ``__HERMES_AUTH_REQUIRED__`` / ``__HERMES_LOCAL_BROWSER_AUTH__``
+        let the SPA pick the right auth scheme for /api/pty and /api/ws.
         """
         try:
             html = _index_path.read_text(encoding="utf-8")
@@ -17792,24 +18535,30 @@ def mount_spa(application: FastAPI):
                 status_code=404,
             )
         chat_js = "true" if _DASHBOARD_EMBEDDED_CHAT_ENABLED else "false"
-        gated = bool(getattr(app.state, "auth_required", False))
+        # Read the mode from the app THIS SPA is mounted on (``application``),
+        # not a module global, so a multi-app process serves each app's real
+        # mode. ``local_browser_auth`` is the actual engaged mode set by
+        # ``start_server`` — NOT merely "not gated" (which would also cover the
+        # headless/no-SPA case).
+        gated = bool(getattr(application.state, "auth_required", False))
+        local = bool(getattr(application.state, "local_browser_auth", False))
         gated_js = "true" if gated else "false"
-        if gated:
-            bootstrap_script = (
-                f"<script>"
-                f"window.__HERMES_DASHBOARD_EMBEDDED_CHAT__={chat_js};"
-                f'window.__HERMES_BASE_PATH__="{prefix}";'
-                f"window.__HERMES_AUTH_REQUIRED__={gated_js};"
-                f"</script>"
-            )
-        else:
-            bootstrap_script = (
-                f'<script>window.__HERMES_SESSION_TOKEN__="{_SESSION_TOKEN}";'
-                f"window.__HERMES_DASHBOARD_EMBEDDED_CHAT__={chat_js};"
-                f'window.__HERMES_BASE_PATH__="{prefix}";'
-                f"window.__HERMES_AUTH_REQUIRED__={gated_js};"
-                f"</script>"
-            )
+        # SEC-AUDIT-001: the SPA never receives a reusable credential in its
+        # HTML. In gated mode the browser authenticates with the provider
+        # session cookie; in loopback mode it proves possession of the
+        # one-time terminal bootstrap code and thereafter uses the local
+        # session cookie. Only non-secret feature flags and base-path config
+        # are injected here — capturing this HTML unauthenticated reveals no
+        # session token, seeded token, bearer token, or bootstrap material.
+        local_browser_js = "true" if local else "false"
+        bootstrap_script = (
+            f"<script>"
+            f"window.__HERMES_DASHBOARD_EMBEDDED_CHAT__={chat_js};"
+            f'window.__HERMES_BASE_PATH__="{prefix}";'
+            f"window.__HERMES_AUTH_REQUIRED__={gated_js};"
+            f"window.__HERMES_LOCAL_BROWSER_AUTH__={local_browser_js};"
+            f"</script>"
+        )
         if prefix:
             # Rewrite absolute asset URLs baked into the Vite build so the
             # browser fetches them through the same proxy prefix.
@@ -19123,6 +19872,45 @@ def _write_dashboard_ready_file(actual_port: int) -> None:
         _log.warning("Failed to write dashboard ready file %r: %s", target, exc)
 
 
+def _stdout_is_interactive() -> bool:
+    """True when there is a protected terminal to display the bootstrap code.
+
+    A launch whose stdout/stdin is not a TTY (systemd, Docker, CI, redirected
+    output) has no safe place to show the one-time code, so the local-browser
+    dashboard fails closed rather than leak a credential to a log.
+    """
+    try:
+        return bool(sys.stdout.isatty() and sys.stdin.isatty())
+    except Exception:
+        return False
+
+
+def _print_local_bootstrap_banner(host: str, port: int, code: str) -> None:
+    """Print the one-time bootstrap code to the invoking terminal ONLY.
+
+    The code is never placed in the launch URL, process arguments, environment,
+    logs, or static assets — only here, on the operator's own terminal, so a
+    co-tenant who can reach the loopback port cannot read it.
+    """
+    if not code:
+        return
+    display_host = host if host not in ("0.0.0.0", "::") else "127.0.0.1"
+    line = "─" * 52
+    print(f"\n{line}", flush=True)
+    print("  Hermes dashboard — one-time browser bootstrap code", flush=True)
+    print(f"    {code}", flush=True)
+    print(
+        f"  Enter it in the dashboard tab at "
+        f"http://{display_host}:{port} to sign in.",
+        flush=True,
+    )
+    print(
+        "  It is single-use, expires shortly, and is shown here only.",
+        flush=True,
+    )
+    print(f"{line}\n", flush=True)
+
+
 def _maybe_open_browser(
     host: str, actual_port: int, open_browser: bool, initial_profile: str
 ) -> None:
@@ -19389,12 +20177,54 @@ def start_server(
     # engages the auth gate even when the backend itself remains on loopback;
     # otherwise the SPA's local session token would become remotely reachable.
     app.state.trusted_public_hosts = _dashboard_public_hosts()
+    # Cache operator-configured browser CORS origins once (dev / split-origin
+    # deploys); the exact-origin CORS middleware reads this instead of loading
+    # config per request.
+    app.state.allowed_browser_origins = _load_configured_browser_origins()
     # Stash the auth-gate flag on app.state so middleware / SPA-token injection /
     # WS-auth paths can branch on it consistently. It also decides whether to
     # refuse startup, log the gate-on banner, and enable uvicorn proxy_headers.
     app.state.auth_required = should_require_dashboard_auth(
         host, app.state.trusted_public_hosts
     )
+
+    # SEC-AUDIT-001: a loopback *browser* dashboard authenticates via a
+    # one-time terminal bootstrap code exchanged for a local session cookie —
+    # never a reusable token in the served HTML. Engage that mode only for a
+    # loopback SPA bind: not headless ``serve`` (no SPA), not a gated/OAuth
+    # bind (provider flow handles it), and only when a built frontend exists.
+    _serves_spa = (
+        not headless
+        and os.environ.get("HERMES_SERVE_HEADLESS") != "1"
+        and WEB_DIST.exists()
+    )
+    app.state.local_browser_auth = bool(_serves_spa and not app.state.auth_required)
+    _local_bootstrap_code = ""
+    if app.state.local_browser_auth:
+        # A non-interactive launch (systemd, Docker, CI, redirected stdout) has
+        # no protected terminal to display the bootstrap code. Fail closed
+        # rather than emit a launch credential through a URL or log: require
+        # configured external auth for that deployment shape instead.
+        if not _stdout_is_interactive():
+            raise SystemExit(
+                "Refusing to serve the browser dashboard non-interactively "
+                "without configured authentication.\n\n"
+                "The loopback dashboard now proves a one-time bootstrap code "
+                "shown in the launching terminal, then exchanges it for a "
+                "session cookie (SEC-AUDIT-001). A service/daemon/CI launch has "
+                "no such terminal, so there is nowhere safe to display the "
+                "code.\n\n"
+                "Fix one of:\n"
+                "  • run `hermes dashboard` from an interactive terminal; or\n"
+                "  • put the dashboard behind an authenticated reverse proxy, "
+                "set dashboard.public_url to the external URL, and configure a "
+                "dashboard auth provider (`hermes dashboard register` / "
+                "dashboard.basic_auth) — this engages the provider gate instead "
+                "of the terminal bootstrap.\n"
+            )
+        from hermes_cli.dashboard_auth import local_browser as _local_browser_store
+
+        _local_bootstrap_code = _local_browser_store.generate_bootstrap_code()
 
     # ``--insecure`` no longer disables the auth gate (June 2026 hardening:
     # the hermes-0day MCP-persistence campaign abused unauthenticated public
@@ -19674,6 +20504,10 @@ def start_server(
                 print(f"  Hermes backend listening on {host}:{actual_port}", flush=True)
             else:
                 print(f"  Hermes Web UI → http://{host}:{actual_port}")
+            if getattr(app.state, "local_browser_auth", False):
+                _print_local_bootstrap_banner(
+                    host, actual_port, _local_bootstrap_code
+                )
             _maybe_open_browser(host, actual_port, open_browser, initial_profile)
 
             # Collapse the peer-hangup teardown flood (#50005). When the Desktop

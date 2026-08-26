@@ -69,6 +69,17 @@ def write_message(obj):
 def main():
     script = os.environ.get("MOCK_LSP_SCRIPT", "clean")
 
+    # SEC-AUDIT-002 test hook: when asked, dump the environment this server was
+    # spawned with so a test can assert the restricted-env contract (no
+    # inherited credentials; correct profile HERMES_HOME present).
+    dump_path = os.environ.get("MOCK_LSP_ENV_DUMP")
+    if dump_path:
+        try:
+            with open(dump_path, "w", encoding="utf-8") as fh:
+                json.dump(dict(os.environ), fh)
+        except OSError:
+            pass
+
     while True:
         msg = read_message()
         if msg is None:

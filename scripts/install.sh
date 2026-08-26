@@ -95,6 +95,12 @@ fi
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --allow-unverified-bootstrap)
+            # Supply-chain (WP4): opt into the UNVERIFIED installers (uv/Node/
+            # cua/etc.) for this run. Sets an internal bridge, not a user env var.
+            export _HERMES_SC_BOOTSTRAP_OVERRIDE=1
+            shift
+            ;;
         --no-venv)
             USE_VENV=false
             shift
@@ -239,6 +245,203 @@ log_warn() {
 
 log_error() {
     echo -e "${RED}✗${NC} $1"
+}
+
+# ── Managed-artifact provenance markers (WP4 A6 — pre-config shell fast path) ──
+# A Hermes-managed uv/node binary ($HERMES_HOME/bin/uv, $HERMES_HOME/node/bin/*)
+# may be EXECUTED — even for a `--version` probe — only when it carries a current
+# provenance marker (<binary>.provenance.json) whose recorded sha256 matches the
+# file's bytes. This runs during bootstrap, BEFORE the Python layer/config
+# exists, so it is pure shell (no python/jq/config dependency). An unmarked
+# (legacy) or tampered managed binary is skipped so the installer re-provisions
+# with verification or uses an operator binary — it is never run on existence
+# alone. The marker shape matches hermes_cli/supply_chain/managed.write_marker
+# so the Python resolver honors what the installer wrote (and vice versa).
+_sc_sha256() {
+    _scf="${1:-}"
+    { [ -n "$_scf" ] && [ -f "$_scf" ]; } || return 1
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$_scf" 2>/dev/null | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$_scf" 2>/dev/null | awk '{print $1}'
+    else
+        return 1
+    fi
+}
+
+_sc_verify_managed_marker() {
+    # 0 => <binary> carries a current marker whose sha256 matches its bytes.
+    # 1 => unmarked / tampered / unhashable -> caller must NOT execute it.
+    _scb="${1:-}"
+    { [ -n "$_scb" ] && [ -f "$_scb" ]; } || return 1
+    _scm="${_scb}.provenance.json"
+    [ -f "$_scm" ] || return 1
+    # recorded digest = the "value" inside the top-level "digest" object; skip
+    # "archive_digest" (which sorts first). Anchor on the "digest" key line.
+    _screc=$(awk '
+        /^[[:space:]]*"digest"[[:space:]]*:/ { ind=1 }
+        ind && /"value"[[:space:]]*:/ {
+            if (match($0, /[0-9a-fA-F]{64}/)) { print substr($0, RSTART, RLENGTH); exit }
+        }' "$_scm" 2>/dev/null)
+    [ -n "$_screc" ] || return 1
+    _scact=$(_sc_sha256 "$_scb") || return 1
+    [ -n "$_scact" ] || return 1
+    _screc=$(printf '%s' "$_screc" | tr 'A-F' 'a-f')
+    _scact=$(printf '%s' "$_scact" | tr 'A-F' 'a-f')
+    [ "$_screc" = "$_scact" ] || return 1
+    return 0
+}
+
+_sc_write_managed_marker() {
+    # _sc_write_managed_marker <binary> <component> <version> <provenance>
+    # Atomically records <binary>.provenance.json so a later fast path trusts
+    # the binary while still catching tampering via the digest. Best-effort.
+    _scb="${1:-}"; _scc="${2:-component}"; _scv="${3:-unknown}"; _scp="${4:-operator_compat_opt_in}"
+    { [ -n "$_scb" ] && [ -f "$_scb" ]; } || return 1
+    _scd=$(_sc_sha256 "$_scb") || return 1
+    [ -n "$_scd" ] || return 1
+    _scm="${_scb}.provenance.json"
+    _scnow=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "1970-01-01T00:00:00Z")
+    _sctmp="${_scm}.tmp.$$"
+    if {
+        printf '{\n'
+        printf '  "component": "%s",\n' "$_scc"
+        printf '  "digest": {\n    "algorithm": "sha256",\n    "value": "%s"\n  },\n' "$_scd"
+        printf '  "marked_at": "%s",\n' "$_scnow"
+        printf '  "provenance": "%s",\n' "$_scp"
+        printf '  "schema": 1,\n'
+        printf '  "version": "%s"\n' "$_scv"
+        printf '}\n'
+    } > "$_sctmp" 2>/dev/null; then
+        mv -f "$_sctmp" "$_scm" 2>/dev/null && return 0
+    fi
+    rm -f "$_sctmp" 2>/dev/null
+    return 1
+}
+
+# _sc_realpath <path> — canonical absolute path (resolve symlinks), best-effort.
+_sc_realpath() {
+    _p="${1:-}"
+    [ -n "$_p" ] || return 1
+    if command -v realpath >/dev/null 2>&1; then
+        realpath "$_p" 2>/dev/null && return 0
+    fi
+    if command -v readlink >/dev/null 2>&1; then
+        readlink -f "$_p" 2>/dev/null && return 0
+    fi
+    ( cd "$(dirname "$_p")" 2>/dev/null && printf '%s/%s' "$(pwd -P)" "$(basename "$_p")" ) 2>/dev/null && return 0
+    printf '%s' "$_p"
+}
+
+# _sc_under_managed_root <path> — 0 when <path> canonicalizes INTO any Hermes-
+# managed root (this profile's + the default root's + every enumerated
+# ~/.hermes/profiles/*/{bin,node,node/bin,uv-tools}), independent of the active
+# HERMES_HOME. An operator/PATH binary that resolves here is the managed binary
+# reached via a PATH/symlink/case alias and must present a marker before use.
+_sc_under_managed_root() {
+    _real=$(_sc_realpath "${1:-}")
+    [ -n "$_real" ] || return 1
+    _hbase="${HERMES_HOME:-$HOME/.hermes}"
+    _droot="$HOME/.hermes"
+    for _base in "$_hbase" "$_droot"; do
+        for _sub in bin node node/bin uv-tools; do
+            _rroot=$(_sc_realpath "$_base/$_sub")
+            [ -n "$_rroot" ] || continue
+            case "$_real/" in "$_rroot"/*) return 0 ;; esac
+        done
+    done
+    if [ -d "$_droot/profiles" ]; then
+        for _pdir in "$_droot"/profiles/*/; do
+            [ -d "$_pdir" ] || continue
+            for _sub in bin node node/bin uv-tools; do
+                _rroot=$(_sc_realpath "${_pdir%/}/$_sub")
+                [ -n "$_rroot" ] || continue
+                case "$_real/" in "$_rroot"/*) return 0 ;; esac
+            done
+        done
+    fi
+    return 1
+}
+
+# _sc_accept_operator <path> — echo <path> when it is safe to execute as an
+# operator binary: either it is NOT under any managed root, or it is AND its
+# provenance marker verifies. Otherwise print nothing (reject) so the caller
+# does not execute a managed binary reached via an alias without a marker.
+_sc_accept_operator() {
+    _cand="${1:-}"
+    [ -n "$_cand" ] || return 1
+    if _sc_under_managed_root "$_cand"; then
+        if _sc_verify_managed_marker "$(_sc_realpath "$_cand")"; then
+            printf '%s' "$_cand"; return 0
+        fi
+        return 1
+    fi
+    printf '%s' "$_cand"; return 0
+}
+
+# ── A1 (final): WHOLE-TREE Node marker via the bundled Python verifier ───────
+# _sc_verify_managed_marker hashes a single binary; the WHOLE node tree (node +
+# npm/npx + npm CLI JS) is verified/created by the shared stdlib verifier
+# (scripts/ci/node_tree_marker.py) using the Python already staged by
+# check_python (which runs before check_node). FAIL CLOSED when no usable Python
+# / verifier is available — an unverifiable managed tree must never execute.
+_sc_python() {
+    for _scc in "${HERMES_PYTHON:-}" python3 python; do
+        [ -n "$_scc" ] || continue
+        if command -v "$_scc" >/dev/null 2>&1; then printf '%s' "$_scc"; return 0; fi
+    done
+    return 1
+}
+
+_sc_node_marker_script() {
+    _scdir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd -P)"
+    [ -n "$_scdir" ] || return 1
+    _scs="$_scdir/ci/node_tree_marker.py"
+    [ -f "$_scs" ] && printf '%s' "$_scs" && return 0
+    return 1
+}
+
+# 0 => managed node tree carries a current WHOLE-TREE marker; 1 => not verified /
+# no python / no verifier -> caller must NOT execute the managed node.
+_sc_verify_node_whole() {
+    _scnode="${1:-$HERMES_HOME/node/bin/node}"
+    _screal=$(_sc_realpath "$_scnode") || return 1
+    _scdir=$(dirname "$_screal")
+    if [ "$(basename "$_scdir")" = "bin" ]; then
+        _scroot=$(dirname "$_scdir")
+    else
+        _scroot="$_scdir"
+    fi
+    _schome=$(dirname "$_scroot")
+    _scpy=$(_sc_python) || return 1
+    _scscript=$(_sc_node_marker_script) || return 1
+    "$_scpy" "$_scscript" --home "$_schome" --verify >/dev/null 2>&1
+}
+
+_sc_write_node_whole() {
+    _scver="${1:-unknown}"
+    _scpy=$(_sc_python) || return 1
+    _scscript=$(_sc_node_marker_script) || return 1
+    "$_scpy" "$_scscript" --home "$HERMES_HOME" --write --version "$_scver" \
+        --provenance operator_compat_opt_in_shell >/dev/null 2>&1
+}
+
+_sc_accept_node_tool() {
+    _sccand="${1:-}"
+    [ -n "$_sccand" ] || return 1
+    if _sc_under_managed_root "$_sccand"; then
+        _screal=$(_sc_realpath "$_sccand") || return 1
+        _scdir=$(dirname "$_screal")
+        if [ "$(basename "$_scdir")" = "bin" ]; then
+            _scanchor="$_scdir/node"
+        else
+            _scanchor="$_scdir/node.exe"
+            [ -f "$_scanchor" ] || _scanchor="$_scdir/node"
+        fi
+        _sc_verify_managed_marker "$_scanchor" || return 1
+        _sc_verify_node_whole "$_screal" || return 1
+    fi
+    printf '%s' "$_sccand"
 }
 
 json_escape() {
@@ -565,14 +768,44 @@ install_uv() {
     # place, so install.sh and `hermes update` stay in sync.
     local _managed_uv="$HERMES_HOME/bin/uv"
 
-    if [ -x "$_managed_uv" ]; then
+    if [ -x "$_managed_uv" ] && _sc_verify_managed_marker "$_managed_uv"; then
         UV_CMD="$_managed_uv"
         UV_VERSION=$($UV_CMD --version 2>/dev/null)
         log_success "Managed uv found ($UV_VERSION)"
         return 0
     fi
+    if [ -x "$_managed_uv" ]; then
+        # Exists but has no current provenance marker (legacy/tampered): do NOT
+        # execute it (not even --version). Fall through to an operator uv or a
+        # gated re-provision that writes a fresh marker.
+        log_warn "Ignoring managed uv at $_managed_uv (no valid provenance marker; A6)."
+    fi
 
-    log_info "Installing managed uv into $HERMES_HOME/bin ..."
+    # Supply-chain gate (WP4): prefer an existing operator-managed uv; otherwise
+    # the astral installer (fetched and executed, unverified) runs only under an
+    # explicit operator opt-in.
+    local _operator_uv
+    _operator_uv="$(command -v uv 2>/dev/null || true)"
+    if [ -n "$_operator_uv" ] && [ "$_operator_uv" != "$_managed_uv" ]; then
+        # A1/A6: a PATH uv that canonicalizes INTO a managed root (this or
+        # another profile's) is the managed binary via alias — accept it only
+        # with a valid marker, verified BEFORE `--version` executes it.
+        if [ -n "$(_sc_accept_operator "$_operator_uv")" ]; then
+            UV_CMD="$_operator_uv"
+            UV_VERSION=$($UV_CMD --version 2>/dev/null)
+            log_success "Using operator-managed uv ($UV_VERSION at $_operator_uv)"
+            return 0
+        fi
+        log_warn "Ignoring PATH uv $_operator_uv: it resolves into a Hermes-managed root without a valid provenance marker (A6)."
+    fi
+    if [ "${_HERMES_SC_BOOTSTRAP_OVERRIDE:-}" != "1" ]; then
+        log_error "Automatic uv install is disabled by default (supply-chain enforce)."
+        log_info "Install uv with your OS/version manager (pipx/brew/winget), or re-run install.sh --allow-unverified-bootstrap."
+        log_info "Manual: https://docs.astral.sh/uv/getting-started/installation/ (see docs/security/supply-chain-migration.md)"
+        exit 1
+    fi
+
+    log_info "Installing managed uv into $HERMES_HOME/bin (UNVERIFIED compatibility bootstrap; opted in) ..."
     mkdir -p "$HERMES_HOME/bin"
 
     # Two-stage: download the installer, then run it.  Piping
@@ -604,6 +837,10 @@ install_uv() {
         fi
         rm -f "$_uv_install_log"
         UV_VERSION=$($UV_CMD --version 2>/dev/null)
+        # A6: record a provenance marker binding this binary's digest so later
+        # fast paths trust it (and still catch a later tamper/swap). This was an
+        # explicit operator-opted-in unverified bootstrap, recorded as such.
+        _sc_write_managed_marker "$_managed_uv" uv "${UV_VERSION:-unknown}" operator_compat_opt_in_shell
         log_success "Managed uv installed ($UV_VERSION)"
     else
         log_error "Failed to install uv"
@@ -938,21 +1175,37 @@ check_node() {
     # fails and the desktop build dies with an opaque "Node.js / npm
     # unavailable" (#77003). Node only counts as found when npm resolves on
     # the same PATH.
-    if command -v node &> /dev/null && command -v npm &> /dev/null \
-        && node_satisfies_build "$(node --version)"; then
-        if npm_supports_npmrc "$(npm --version 2>/dev/null)"; then
-            log_success "Node.js $(node --version) found"
+    local path_node="" path_npm="" node_version="" npm_version=""
+    if command -v node &> /dev/null; then
+        path_node=$(_sc_accept_node_tool "$(command -v node 2>/dev/null)") || path_node=""
+    fi
+    if command -v npm &> /dev/null; then
+        path_npm=$(_sc_accept_node_tool "$(command -v npm 2>/dev/null)") || path_npm=""
+    fi
+    if [ -n "$path_node" ] && [ -n "$path_npm" ]; then
+        node_version=$("$path_node" --version 2>/dev/null) || node_version=""
+        npm_version=$("$path_npm" --version 2>/dev/null) || npm_version=""
+    fi
+    if [ -n "$node_version" ] && [ -n "$npm_version" ] \
+        && node_satisfies_build "$node_version"; then
+        if npm_supports_npmrc "$npm_version"; then
+            log_success "Node.js $node_version found"
             HAS_NODE=true
             return 0
         fi
-        log_warn "npm $(npm --version) cannot honor this repo's .npmrc (npm 11.10-11.16 ignore"
+        log_warn "npm $npm_version cannot honor this repo's .npmrc (npm 11.10-11.16 ignore"
         log_warn "min-release-age-exclude) — installing Hermes-managed Node $NODE_VERSION instead..."
         install_node
         return
     fi
 
     # Prefer a Hermes-managed Node from a previous run over a too-old system one.
+    # A6/A1: verify the WHOLE-TREE provenance marker BEFORE executing it (the
+    # $(node --version) below runs the binary), so a tampered/legacy/partial
+    # managed tree (node, npm/npx, or an npm CLI JS file) is never run.
     if [ -x "$HERMES_HOME/node/bin/node" ] && [ -x "$HERMES_HOME/node/bin/npm" ] \
+        && _sc_verify_managed_marker "$HERMES_HOME/node/bin/node" \
+        && _sc_verify_node_whole "$HERMES_HOME/node/bin/node" \
         && node_satisfies_build "$("$HERMES_HOME/node/bin/node" --version)"; then
         export PATH="$HERMES_HOME/node/bin:$PATH"
         log_success "Node.js $("$HERMES_HOME/node/bin/node" --version) found (Hermes-managed)"
@@ -963,7 +1216,7 @@ check_node() {
     if command -v node &> /dev/null && ! command -v npm &> /dev/null; then
         log_warn "node found but npm is not on PATH (stray node symlink?) — installing Hermes-managed Node $NODE_VERSION LTS..."
     elif command -v node &> /dev/null; then
-        log_warn "Node.js $(node --version) is too old (Hermes requires Node >=26) — installing Hermes-managed Node $NODE_VERSION..."
+        log_warn "Node.js is untrusted or too old (Hermes requires Node >=26) — installing Hermes-managed Node $NODE_VERSION..."
     elif [ "$DISTRO" = "termux" ]; then
         log_info "Node.js not found — installing Node.js via pkg..."
     else
@@ -1011,6 +1264,17 @@ install_node() {
             return 0
             ;;
     esac
+
+    # Supply-chain gate (WP4): the nodejs.org download is fetched unverified.
+    # A suitable operator-managed Node was already preferred earlier; this
+    # managed download runs only under an explicit operator opt-in.
+    if [ "${_HERMES_SC_BOOTSTRAP_OVERRIDE:-}" != "1" ]; then
+        log_warn "Automatic Hermes-managed Node.js download is disabled by default (supply-chain enforce)."
+        log_info "Install a supported Node.js with your OS/version manager (nvm/fnm/apt/brew), or re-run install.sh --allow-unverified-bootstrap."
+        log_info "Manual: https://nodejs.org/en/download/ (see docs/security/supply-chain-migration.md)"
+        HAS_NODE=false
+        return 0
+    fi
 
     # Resolve the latest v${NODE_VERSION}.x.x tarball name from the index page
     local index_url="https://nodejs.org/dist/latest-v${NODE_VERSION}.x/"
@@ -1082,7 +1346,24 @@ install_node() {
     export PATH="$HERMES_HOME/node/bin:$PATH"
 
     local installed_ver
-    installed_ver=$("$HERMES_HOME/node/bin/node" --version 2>/dev/null)
+    installed_ver="v$(printf '%s' "$tarball_name" | sed -n 's/^node-v\([0-9][0-9.]*\)-.*/\1/p')"
+    # A6: mark the freshly-installed managed node (and npm/npx) so a later run's
+    # fast path trusts it while still catching a subsequent tamper/swap.
+    _sc_write_managed_marker "$HERMES_HOME/node/bin/npm"  node "${installed_ver:-unknown}" operator_compat_opt_in_shell
+    # A1 (final): the WHOLE-TREE marker on node (node + npm/npx + npm CLI JS) is
+    # authoritative for the managed fast-path gate and the Python resolver.
+    # Written LAST so it wins over any per-binary node marker; per-binary fallback
+    # only when no Python/verifier is available (runtime heal upgrades it).
+    if ! _sc_write_node_whole "${installed_ver:-unknown}" \
+        || ! _sc_verify_node_whole "$HERMES_HOME/node/bin/node"; then
+        log_error "Managed Node whole-tree provenance marker could not be created; refusing to execute it."
+        HAS_NODE=false
+        return 1
+    fi
+    installed_ver=$("$HERMES_HOME/node/bin/node" --version 2>/dev/null) || {
+        HAS_NODE=false
+        return 1
+    }
     log_success "Node.js $installed_ver installed to ~/.hermes/node/"
     HAS_NODE=true
 }
@@ -1601,6 +1882,30 @@ install_deps() {
             log_info "Using ANDROID_API_LEVEL=$ANDROID_API_LEVEL for Android wheel builds"
         fi
 
+        # Supply-chain (WP4 A7): the Termux pip path is version-constrained
+        # (constraints-termux.txt), NOT hash-locked (--require-hashes), so a
+        # compromised wheel/sdist that still satisfies the version pin would not
+        # be rejected. Disabled by default: it runs only under an explicit
+        # --allow-unverified-bootstrap (the _HERMES_SC_BOOTSTRAP_OVERRIDE bridge
+        # set after arg parsing), or when a committed --require-hashes graph is
+        # available. No hashed graph is committed today, so the secure default
+        # fails closed BEFORE any pip execution. (Mirrors sc_termux_deps_gate in
+        # scripts/lib/supply-chain-gate.sh; install.sh is curl|bash-delivered so
+        # the check is inlined self-contained rather than sourced.)
+        _termux_hashed_graph="$INSTALL_DIR/requirements-termux.hashes.txt"
+        if [ "${_HERMES_SC_BOOTSTRAP_OVERRIDE:-}" != "1" ] && \
+           ! { [ -f "$_termux_hashed_graph" ] && grep -q -- '--hash=sha256:' "$_termux_hashed_graph" 2>/dev/null; }; then
+            log_error "Termux dependency install is disabled by default (supply-chain enforce)."
+            log_info "The Android pip path is version-constrained (constraints-termux.txt), not hash-locked,"
+            log_info "so a compromised wheel/sdist would not be rejected, and no committed --require-hashes"
+            log_info "graph is available in this checkout."
+            log_info "Options:"
+            log_info "  - Provision a hash-locked Termux venv yourself (operator-managed), OR"
+            log_info "  - Re-run: install.sh --allow-unverified-bootstrap  (BREAK-GLASS: version-constrained, UNVERIFIED)."
+            log_info "See docs/security/supply-chain-migration.md"
+            exit 1
+        fi
+
         "$PIP_PYTHON" -m pip install --upgrade pip setuptools wheel >/dev/null
 
         # On Android, psutil's setup.py rejects sys.platform == 'android' before
@@ -1717,6 +2022,21 @@ install_deps() {
         log_warn "uv.lock sync failed (see uv output above), falling back to PyPI resolve..."
     else
         log_info "uv.lock not found — falling back to PyPI resolve (no hash verification)"
+    fi
+
+    # A7: the multi-tier fallback below re-resolves dependencies from PyPI with
+    # NO hash verification (`uv pip install -e`). Under the secure default it
+    # does NOT run — a missing or failed hash-verified `uv sync --locked` aborts
+    # HERE, before the tier cascade, unless the operator opted into unverified
+    # bootstrap (--allow-unverified-bootstrap sets the internal bridge). Prefer
+    # repairing uv.lock / running from a clean checkout over the unverified path.
+    if [ "${_HERMES_SC_BOOTSTRAP_OVERRIDE:-}" != "1" ]; then
+        log_error "Hash-verified install (uv sync --extra all --locked) did not complete."
+        log_info "The unverified PyPI re-resolve fallback is disabled by default (supply-chain enforce)."
+        log_info "Repair uv.lock (or install from a clean checkout at the release commit), or"
+        log_info "re-run: install.sh --allow-unverified-bootstrap  (BREAK-GLASS: UNVERIFIED PyPI resolve)."
+        log_info "See docs/security/supply-chain-migration.md"
+        exit 1
     fi
 
     # Multi-tier fallback. The point of the tiers is that ONE compromised
@@ -2341,6 +2661,14 @@ run_playwright_install() {
     local timeout_seconds="$1"
     shift
 
+    # Supply-chain gate (WP4): the Playwright Chromium download is an unverified
+    # browser payload. Disabled by default; requires --allow-unverified-bootstrap.
+    if [ "${_HERMES_SC_BOOTSTRAP_OVERRIDE:-}" != "1" ]; then
+        log_warn "Playwright Chromium download is disabled by default (supply-chain enforce); browser tools stay disabled until you install it."
+        log_info "Re-run install.sh --allow-unverified-bootstrap, or run 'npx playwright install chromium' manually. See docs/security/supply-chain-migration.md"
+        return 1
+    fi
+
     # First attempt: native platform resolution (inherits any operator override).
     if run_browser_install_with_timeout "$timeout_seconds" "$@" 2>/dev/null; then
         return 0
@@ -2410,7 +2738,7 @@ install_node_deps() {
     if [ "$DISTRO" = "termux" ]; then
         log_info "Skipping automatic Node/browser dependency setup on Termux"
         log_info "Browser automation is not part of the tested Termux install path yet."
-        log_info "If you want to experiment manually later, run: cd $INSTALL_DIR && npm install"
+        log_info "If you want to experiment manually later, run: cd $INSTALL_DIR && npm ci --ignore-scripts && node apps/desktop/scripts/run-allowed-lifecycle.mjs"
         return 0
     fi
 
@@ -2425,7 +2753,12 @@ install_node_deps() {
         # Capture npm output so failures are diagnosable (#87340).
         local npm_log
         npm_log="$(mktemp)"
-        if ! run_with_timeout "$NODE_DEPS_TIMEOUT" npm install --silent \
+        # A4: install WITHOUT running lifecycle scripts — npm's allowScripts
+        # field is not honored by every supported npm major, so --ignore-scripts
+        # is the version-independent guarantee that no dependency runs arbitrary
+        # install-time code. Only the reviewed, allowlisted lifecycle scripts run
+        # afterwards, via the audited orchestrator (get-windows never runs).
+        if ! run_with_timeout "$NODE_DEPS_TIMEOUT" npm install --silent --ignore-scripts \
                 >"$npm_log" 2>&1; then
             log_error "npm install failed or timed out; Node.js dependencies were not installed"
             if [ -s "$npm_log" ]; then
@@ -2437,6 +2770,25 @@ install_node_deps() {
             return 1
         fi
         rm -f "$npm_log"
+        # A4: run ONLY the reviewed, allowlisted lifecycle scripts (electron
+        # binary, node-pty prebuild, ...). get-windows's install script is never
+        # executed; its binding is staged from a manifest-pinned digest instead.
+        if [ -f "$INSTALL_DIR/apps/desktop/scripts/run-allowed-lifecycle.mjs" ]; then
+            local allow_log
+            allow_log="$(mktemp)"
+            if ! run_with_timeout "$NODE_DEPS_TIMEOUT" \
+                    node "$INSTALL_DIR/apps/desktop/scripts/run-allowed-lifecycle.mjs" \
+                    >"$allow_log" 2>&1; then
+                log_error "allowlisted lifecycle scripts failed; native setup is incomplete"
+                if [ -s "$allow_log" ]; then
+                    log_error "output:"
+                    cat "$allow_log" >&2
+                fi
+                rm -f "$allow_log"
+                return 1
+            fi
+            rm -f "$allow_log"
+        fi
         log_success "Node.js dependencies installed"
 
         # Install Playwright browser + system dependencies.
@@ -2541,7 +2893,9 @@ install_node_deps() {
         # Capture npm output so failures are diagnosable (#87340).
         local tui_npm_log
         tui_npm_log="$(mktemp)"
-        if ! run_with_timeout "$NODE_DEPS_TIMEOUT" npm install --silent \
+        # A4: install WITHOUT lifecycle scripts (npm 10 ignores allowScripts);
+        # the allowlisted lifecycle runs afterwards via the audited orchestrator.
+        if ! run_with_timeout "$NODE_DEPS_TIMEOUT" npm install --silent --ignore-scripts \
                 >"$tui_npm_log" 2>&1; then
             log_error "TUI npm install failed or timed out; TUI dependencies were not installed"
             if [ -s "$tui_npm_log" ]; then
@@ -2553,6 +2907,25 @@ install_node_deps() {
             return 1
         fi
         rm -f "$tui_npm_log"
+        # A4: run ONLY the reviewed, allowlisted lifecycle scripts (node-pty
+        # prebuild, ...). Arbitrary dependency install hooks never execute.
+        if [ -f "$INSTALL_DIR/apps/desktop/scripts/run-allowed-lifecycle.mjs" ]; then
+            local tui_allow_log
+            tui_allow_log="$(mktemp)"
+            if ! run_with_timeout "$NODE_DEPS_TIMEOUT" \
+                    node "$INSTALL_DIR/apps/desktop/scripts/run-allowed-lifecycle.mjs" \
+                    >"$tui_allow_log" 2>&1; then
+                log_error "allowlisted lifecycle scripts failed; TUI native setup is incomplete"
+                if [ -s "$tui_allow_log" ]; then
+                    log_error "output:"
+                    cat "$tui_allow_log" >&2
+                fi
+                rm -f "$tui_allow_log"
+                restore_dirty_lockfiles "$INSTALL_DIR"
+                return 1
+            fi
+            rm -f "$tui_allow_log"
+        fi
         log_success "TUI dependencies installed"
     fi
 
@@ -2577,19 +2950,55 @@ install_browser_use_cli() {
         log_info "Skipping Browser Use CLI install (uv unavailable)"
         return 0
     fi
+    # A6 helper: verify/write the managed browser-use provenance marker via the
+    # installed hermes so this shell install stays consistent with the Python
+    # resolver (tools/browser_use_cli.py), which refuses a copy whose launcher
+    # OR tool tree is unmarked/tampered. The marker binds BOTH.
+    local _vpy="$INSTALL_DIR/venv/bin/python"
+    local _bu_tree="$HERMES_HOME/uv-tools/browser-use"
+    _bws_managed_ok() {
+        [ -x "$_vpy" ] || return 1
+        "$_vpy" - "$1" "$_bu_tree" <<'PY' 2>/dev/null
+import sys
+from hermes_cli.supply_chain.managed import tool_marker_ok
+sys.exit(0 if tool_marker_ok(sys.argv[1], tree_dir=sys.argv[2], component="browser-use") else 1)
+PY
+    }
+    _bws_write_marker() {
+        [ -x "$_vpy" ] || return 0
+        "$_vpy" - "$1" "$_bu_tree" <<'PY' 2>/dev/null || true
+import sys
+from hermes_cli.supply_chain.managed import write_tool_marker
+write_tool_marker(sys.argv[1], tree_dir=sys.argv[2], component="browser-use", version="installed", provenance="operator_compat_opt_in")
+PY
+    }
     # MANAGED-FIRST: only Hermes' managed copy short-circuits. A browser-use
     # on the user's PATH is a side install — resolution prefers the managed
     # copy, so it must be provisioned regardless.
-    if [ -x "$HERMES_HOME/bin/browser-use" ]; then
+    # A6: short-circuit ONLY on a marker-verified managed copy; an unmarked
+    # legacy one is not trusted and is re-provisioned (which re-marks it).
+    if [ -x "$HERMES_HOME/bin/browser-use" ] && _bws_managed_ok "$HERMES_HOME/bin/browser-use"; then
         log_success "Browser Use CLI already installed"
         return 0
     fi
 
+    # A7: `uv tool install browser-use` resolves an UNPINNED package from the
+    # network. Disabled by default (supply-chain enforce); the Python resolver
+    # gates the same install at runtime (compat_opt_in). Opt in explicitly.
+    if [ "${_HERMES_SC_BOOTSTRAP_OVERRIDE:-}" != "1" ]; then
+        log_info "Browser Use CLI auto-install disabled by default (supply-chain enforce): it resolves an unpinned package from the network."
+        log_info "Re-run install.sh --allow-unverified-bootstrap, or install later via 'hermes tools' / config allow_unverified_components: [\"browser-use\"]."
+        return 0
+    fi
+
     log_info "Installing Browser Use CLI (default browser backend)..."
-    # UV_TOOL_BIN_DIR keeps the binary inside Hermes' managed bin dir, where
-    # the browser tool resolves it — no reliance on the user's PATH.
-    if run_with_timeout 600 env UV_NO_CONFIG=1 UV_TOOL_BIN_DIR="$HERMES_HOME/bin" \
+    # Profile-scoped UV_TOOL_DIR + UV_TOOL_BIN_DIR keep the launcher AND the tool
+    # env inside Hermes, where the browser tool resolves and marker-verifies it.
+    if run_with_timeout 600 env UV_NO_CONFIG=1 UV_TOOL_DIR="$HERMES_HOME/uv-tools" UV_TOOL_BIN_DIR="$HERMES_HOME/bin" \
         "$UV_CMD" tool install browser-use >/dev/null 2>&1; then
+        # A6: mark the freshly-installed managed browser-use so the Python
+        # resolver trusts it (else it would ignore + re-install on first use).
+        [ -x "$HERMES_HOME/bin/browser-use" ] && _bws_write_marker "$HERMES_HOME/bin/browser-use"
         log_success "Browser Use CLI installed"
     else
         log_warn "Browser Use CLI install failed — browser automation falls back to built-in tools."
@@ -3199,6 +3608,17 @@ install_desktop_voice_deps() {
         log_warn "uv unavailable — voice/wake deps will lazy-install at first use instead"
         return 0
     fi
+    # A7: the voice/wake pre-install re-resolves onnxruntime/faster-whisper from
+    # PyPI without hash verification. Disabled by default; the (already-gated)
+    # lazy first-use install remains the fallback. Opt in explicitly to
+    # pre-install here.
+    if [ "${_HERMES_SC_BOOTSTRAP_OVERRIDE:-}" != "1" ]; then
+        log_info "Voice/wake dependency pre-install disabled by default (supply-chain enforce); they lazy-install at first use, or re-run install.sh --allow-unverified-bootstrap."
+        if [ "$USE_VENV" = true ] && [ -z "$_prev_venv" ]; then
+            unset VIRTUAL_ENV
+        fi
+        return 0
+    fi
     log_info "Installing voice + wake-word dependencies (onnxruntime, faster-whisper — 1-3min)..."
     if (cd "$INSTALL_DIR" && $UV_CMD pip install -e ".[wake,voice]") ; then
         log_success "Voice + wake-word dependencies installed"
@@ -3262,11 +3682,11 @@ install_desktop() {
     log_info "Installing desktop workspace dependencies (includes Electron ~150MB, 1-3min)..."
     local _deps_start _deps_remaining
     _deps_start=$(date +%s)
-    if run_with_timeout "$DESKTOP_BUILD_TIMEOUT" bash -c 'cd "$1" && npm ci' _ "$INSTALL_DIR"; then
+    if run_with_timeout "$DESKTOP_BUILD_TIMEOUT" bash -c 'cd "$1" && npm ci --ignore-scripts && node apps/desktop/scripts/run-allowed-lifecycle.mjs' _ "$INSTALL_DIR"; then
         log_success "Desktop workspace dependencies installed"
     elif _deps_remaining=$(( DESKTOP_BUILD_TIMEOUT - ($(date +%s) - _deps_start) )); \
          [ "$_deps_remaining" -lt 30 ] && _deps_remaining=30; \
-         run_with_timeout "$_deps_remaining" bash -c 'cd "$1" && npm install' _ "$INSTALL_DIR"; then
+         run_with_timeout "$_deps_remaining" bash -c 'cd "$1" && npm install --ignore-scripts && node apps/desktop/scripts/run-allowed-lifecycle.mjs' _ "$INSTALL_DIR"; then
         log_success "Desktop workspace dependencies installed"
     elif _electron_pkg_staged_missing_dist "$INSTALL_DIR"; then
         log_warn "Desktop dependency install failed with a missing Electron dist; attempting self-heal..."
@@ -3282,7 +3702,7 @@ install_desktop() {
         log_info "earlier 'sudo npm' or 'sudo npx'. Reclaim ownership and retry:"
         log_info "  sudo chown -R \"\$(id -un)\" ~/.npm && npm cache verify"
         log_info "Then re-run this installer, or build manually:"
-        log_info "  cd \"$INSTALL_DIR\" && npm ci && cd apps/desktop && npm run pack"
+        log_info "  cd \"$INSTALL_DIR\" && npm ci --ignore-scripts && node apps/desktop/scripts/run-allowed-lifecycle.mjs && cd apps/desktop && npm run pack"
         return 1
     fi
 

@@ -34,7 +34,7 @@ import { ModelReloadConfirm } from "@/components/ModelReloadConfirm";
 import { ReasoningPicker } from "@/components/ReasoningPicker";
 import { GatewayClient, type ConnectionState } from "@/lib/gatewayClient";
 import { api, buildWsUrl } from "@/lib/api";
-import { maybeReloadForLoopbackWsAuthFailure } from "@/lib/dashboard-auth-reload";
+import { maybeReturnToBootstrapGateOnWsAuthFailure } from "@/lib/dashboard-auth-reload";
 import {
   EVENTS_CONNECT_TIMEOUT_MS,
   EVENTS_DISCONNECTED_MESSAGE,
@@ -379,7 +379,7 @@ export function ChatSidebar({
           return;
         }
         clearConnectTimer();
-        if (maybeReloadForLoopbackWsAuthFailure(ev.code)) {
+        if (maybeReturnToBootstrapGateOnWsAuthFailure(ev.code)) {
           return;
         }
         if (isEventsAuthRejection(ev.code)) {

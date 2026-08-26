@@ -479,8 +479,9 @@ async fn run_bootstrap(
         tracing::info!(target: "bootstrap.log", "{line}");
     };
 
-    // 1. Resolve install.ps1
-    let script = install_script::resolve(kind, &pin, &emit_log)
+    // 1. Resolve install.ps1 (A10: attested production installers require an
+    //    exact full-commit identity — see install_script::require_attested).
+    let script = install_script::resolve(kind, &pin, install_script::require_attested(), &emit_log)
         .await
         .map_err(|e| {
             let msg = format!("resolve install script failed: {e:#}");

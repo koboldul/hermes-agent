@@ -32,7 +32,7 @@ const gatewayMocks = vi.hoisted(() => {
 });
 
 const reloadMocks = vi.hoisted(() => ({
-  maybeReloadForLoopbackWsAuthFailure: vi.fn(() => true),
+  maybeReturnToBootstrapGateOnWsAuthFailure: vi.fn(() => true),
 }));
 
 vi.mock("@/lib/api", () => ({
@@ -40,8 +40,8 @@ vi.mock("@/lib/api", () => ({
   buildWsUrl: apiMocks.buildWsUrl,
 }));
 vi.mock("@/lib/dashboard-auth-reload", () => ({
-  maybeReloadForLoopbackWsAuthFailure:
-    reloadMocks.maybeReloadForLoopbackWsAuthFailure,
+  maybeReturnToBootstrapGateOnWsAuthFailure:
+    reloadMocks.maybeReturnToBootstrapGateOnWsAuthFailure,
 }));
 vi.mock("@/lib/gatewayClient", () => ({
   GatewayClient: class {
@@ -119,7 +119,7 @@ beforeEach(() => {
   apiMocks.buildWsUrl.mockResolvedValue(
     "ws://localhost/api/events?channel=chat-1",
   );
-  reloadMocks.maybeReloadForLoopbackWsAuthFailure.mockReturnValue(true);
+  reloadMocks.maybeReturnToBootstrapGateOnWsAuthFailure.mockReturnValue(true);
   vi.stubGlobal("WebSocket", FakeWebSocket);
 });
 
@@ -143,7 +143,7 @@ describe("ChatSidebar event socket", () => {
     FakeWebSocket.instances[0].emit("close", { code: 4401 });
 
     expect(
-      reloadMocks.maybeReloadForLoopbackWsAuthFailure,
+      reloadMocks.maybeReturnToBootstrapGateOnWsAuthFailure,
     ).toHaveBeenCalledWith(4401);
   });
 });
@@ -152,7 +152,7 @@ describe("ChatSidebar event socket reconnect", () => {
   beforeEach(() => {
     // Not loopback: exercise the gated-mode path so closes fall through to
     // the reconnect logic instead of triggering a page reload.
-    reloadMocks.maybeReloadForLoopbackWsAuthFailure.mockReturnValue(false);
+    reloadMocks.maybeReturnToBootstrapGateOnWsAuthFailure.mockReturnValue(false);
     vi.useFakeTimers();
   });
 

@@ -47,6 +47,16 @@ Pick the row that matches your goal:
 ---
 
 ## 1. Install Hermes Agent
+
+:::warning Prerequisite: install `uv` first
+Hermes builds its Python environment with [`uv`](https://docs.astral.sh/uv/). For supply-chain safety the installer uses an operator-installed `uv` and **won't** auto-download it — install `uv` before running any command below:
+
+- **Linux / macOS / WSL2:** `pipx install uv` (or `brew install uv`)
+- **Windows (native, PowerShell):** `winget install astral-sh.uv`
+
+Verify with `uv --version`. If `uv`, Node.js, or Git are missing the installer stops with the exact fix rather than fetching unverified binaries. **Android/Termux is exempt** (it uses `pip`, not `uv`). See the [Installation guide](./installation.md) for details.
+:::
+
 ### With the Hermes Desktop installer on macOS or Windows (recommended)
 To easily install the command-line and desktop applications, [download the Hermes Desktop installer](https://hermes-agent.nousresearch.com/) from our website and run it.
 

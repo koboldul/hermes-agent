@@ -57,10 +57,148 @@
  *   - electronPlatformName: 'win32' | 'darwin' | 'linux'
  *   - arch:                 Arch enum (0=ia32, 1=x64, 2=armv7l, 3=arm64, 4=universal)
  */
-import { existsSync, rmSync, renameSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, rmSync, renameSync } from 'node:fs'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { Arch } from 'electron-builder'
 import { stageNodePty, stageGetWindows } from './stage-native-deps.mjs'
+import { assertProductionStampForTargets, electronBreakGlassAllowedForTargets, isProductionBuildFromTargets, isPublishReleaseContext, readStamp } from './release-gate.mjs'
+import {
+  assertPackagedInputClean,
+  defaultGitExec,
+  DESKTOP_SHADOW_PATHS,
+  desktopPackagedInputPaths
+} from './packaged-input-guard.mjs'
+import { assertVerifiedElectronDist, PROVENANCE_MARKER } from './electron-dist-verifier.mjs'
+import { supplyChainAllowsUnverified } from './native-payload-verifier.mjs'
+
+const _desktopRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+const _repoRoot = path.resolve(_desktopRoot, '..', '..')
+
+// ── Alert 2: independent verified-electronDist enforcement helpers ────────────
+
+function _readJson(p) {
+  return JSON.parse(readFileSync(p, 'utf8'))
+}
+
+// Independent (not the wrapper's) reader of the committed electron manifest.
+function _electronManifestComponent() {
+  const manifest = _readJson(path.join(_repoRoot, 'supply-chain', 'manifest.json'))
+  const comp = (manifest.components || []).find((c) => c.name === 'electron')
+  if (!comp || !comp.version) throw new Error('supply-chain/manifest.json has no electron component')
+  return comp
+}
+
+const _MANIFEST_PLATFORM = { darwin: 'macos', win32: 'windows', linux: 'linux' }
+const _MANIFEST_ARCH = { x64: 'x86_64', arm64: 'aarch64' }
+
+function _committedElectronDigest(comp, platform, arch) {
+  const mp = _MANIFEST_PLATFORM[platform] ?? platform
+  const ma = _MANIFEST_ARCH[arch] ?? arch
+  const art = (comp.artifacts || []).find((a) => a.platform === mp && a.arch === ma)
+  const value = art && art.digest && art.digest.value
+  return art && art.digest && art.digest.status === 'present' && typeof value === 'string' ? value : null
+}
+
+function _pathIsInside(child, parent) {
+  const rel = path.relative(parent, child)
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))
+}
+
+function _readElectronTree(distDir) {
+  const map = new Map()
+  const walk = (dir, base) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      if (base === '' && e.name === PROVENANCE_MARKER) continue
+      const full = path.join(dir, e.name)
+      const rel = base ? `${base}/${e.name}` : e.name
+      if (e.isDirectory()) walk(full, rel)
+      else if (e.isFile()) map.set(rel, readFileSync(full))
+    }
+  }
+  if (existsSync(distDir)) walk(distDir, '')
+  return map
+}
+
+function _realElectronDeps() {
+  const comp = _electronManifestComponent()
+  return {
+    verifiedRoot: path.join(_desktopRoot, 'node_modules', '.cache', 'hermes-electron-verified'),
+    version: comp.version,
+    committedDigestFor: (t) => _committedElectronDigest(comp, t.platform, t.arch),
+    distExists: (d) => existsSync(path.join(d, PROVENANCE_MARKER)),
+    readMarker: (d) => {
+      try {
+        return _readJson(path.join(d, PROVENANCE_MARKER))
+      } catch {
+        return null
+      }
+    },
+    readTree: _readElectronTree,
+    isInside: _pathIsInside,
+    basename: path.basename
+  }
+}
+
+function _configElectronDist(context) {
+  return (
+    (context && context.packager && context.packager.config && context.packager.config.electronDist) ||
+    (context && context.packager && context.packager.info && context.packager.info.config && context.packager.info.config.electronDist) ||
+    (context && context.config && context.config.electronDist) ||
+    undefined
+  )
+}
+
+function _electronBreakGlass() {
+  try {
+    const home = process.env.HERMES_HOME || path.join(process.env.HOME || process.env.USERPROFILE || '', '.hermes')
+    return supplyChainAllowsUnverified('electron', readFileSync(path.join(home, 'config.yaml'), 'utf8'))
+  } catch {
+    return false
+  }
+}
+
+/**
+ * B3: INDEPENDENTLY require + validate a target-specific verified electronDist
+ * for the current production target. A direct `electron-builder` (no wrapper)
+ * reaches here with no verified electronDist and is REJECTED. Break-glass on
+ * unverified Electron is limited to explicit `--dir` development packs — EVERY
+ * artifact-producing (production) target rejects unverified Electron, derived
+ * from isProductionBuildFromTargets and independent of --publish/tag. Because
+ * this gate only runs for production builds (the caller checks
+ * isProductionBuildFromTargets), allowUnverified resolves to false here; the
+ * decision is computed explicitly so it stays correct if ever called directly.
+ */
+function verifyElectronDistForContext(context, { env = process.env, opts = {} } = {}) {
+  const platform = context && context.electronPlatformName
+  const archName = context && typeof context.arch === 'number' ? Arch[context.arch] : context && context.arch
+  const target = { platform, arch: archName }
+
+  let electronDist = opts.electronDist != null ? opts.electronDist : _configElectronDist(context)
+  if (electronDist && !path.isAbsolute(electronDist)) {
+    electronDist = path.resolve(_desktopRoot, electronDist)
+  }
+
+  const deps = opts.electronDeps || _realElectronDeps()
+  const optIn = opts.electronBreakGlass != null ? opts.electronBreakGlass : _electronBreakGlass()
+  // B3: derive the break-glass decision from the RESOLVED targets, not from
+  // --publish/tag. Every artifact-producing target (NSIS/MSI/DMG/AppImage/…)
+  // denies unverified Electron; only an all-`dir` dev pack (which never reaches
+  // this gate) may opt in.
+  const targetNames = (context && Array.isArray(context.targets) ? context.targets : [])
+    .map((t) => t && t.name)
+    .filter(Boolean)
+  const allowUnverified = electronBreakGlassAllowedForTargets(targetNames, env, optIn)
+
+  const res = assertVerifiedElectronDist(target, electronDist, deps, { allowUnverified })
+  if (res && res.verified === false) {
+    console.warn(
+      `[before-pack] ⚠ UNVERIFIED ELECTRON (break-glass): packaging ${platform}-${archName} with an ` +
+        `unverified electron dist — this artifact is NOT release-grade (${res.reason}).`
+    )
+  }
+  return res
+}
 
 export function cleanStaleAppOutDir(appOutDir) {
   if (!appOutDir || typeof appOutDir !== 'string') {
@@ -110,7 +248,50 @@ export function preserveRollbackBackup(appOutDir, productExeName = 'Hermes.exe')
   }
 }
 
-export default async function beforePack(context) {
+export default async function beforePack(context, opts = {}) {
+  // A10: enforce the attested install stamp for EVERY artifact-producing pack,
+  // right here in the electron-builder hook — so a DIRECT `electron-builder`
+  // invocation (bypassing scripts/run-electron-builder.mjs) is still gated. The
+  // resolved targets decide production vs. the exempt `--dir` dev pack. Throwing
+  // fails the build closed before any artifact is written.
+  const env = opts.env || process.env
+  const stampPath = opts.stampPath || path.join(_desktopRoot, 'build', 'install-stamp.json')
+  {
+    const targetNames = (context && Array.isArray(context.targets) ? context.targets : [])
+      .map((t) => t && t.name)
+      .filter(Boolean)
+    assertProductionStampForTargets({ targetNames, env, stampPath })
+
+    // A5: for a production pack, INDEPENDENTLY re-interrogate git over the FULL
+    // input closure — do not trust the stamp JSON alone. Prove HEAD == the
+    // stamped commit and that the packaged/build-input tree (apps/desktop,
+    // apps/shared, root package.json/lock, every workspace manifest, native
+    // staging scripts, supply-chain manifest) has no tracked changes AND no
+    // untracked files, AND that the source dirs have no IGNORED shadow files
+    // (e.g. a stray apps/shared/src/index.js over the committed index.ts). git
+    // unavailable → fail closed.
+    if (isProductionBuildFromTargets(targetNames, env)) {
+      const stamp = readStamp(stampPath)
+      const cwd = opts.cwd || _repoRoot
+      assertPackagedInputClean({
+        stampedCommit: stamp && stamp.commit,
+        packagedPaths: opts.packagedPaths || desktopPackagedInputPaths(cwd),
+        shadowPaths: opts.shadowPaths || DESKTOP_SHADOW_PATHS,
+        execFn: opts.execFn || defaultGitExec,
+        cwd,
+        label: 'before-pack'
+      })
+
+      // Alert 2: INDEPENDENTLY require + validate a target-specific verified
+      // electronDist. A direct `electron-builder` (bypassing the wrapper) has no
+      // verified dist and is REJECTED here — it would otherwise fetch electron
+      // via @electron/get (unverified). opts.verifyElectronDist overrides the
+      // default for unit tests that focus on other gates.
+      const verifyElectron = opts.verifyElectronDist || verifyElectronDistForContext
+      verifyElectron(context, { env, opts })
+    }
+  }
+
   const appOutDir = context && context.appOutDir
   const platformName = context && context.electronPlatformName
   try {
@@ -146,7 +327,9 @@ export default async function beforePack(context) {
       }
       // The macOS helper is universal, while Windows bindings are arch-specific.
       // Pass the target arch so an ARM64 package never stages an x64 binding.
-      stageGetWindows({ platform, arch: archName })
+      // A6: for a publish/tag release the get-windows FINAL swap is fail-closed
+      // if the shared Python transaction is unavailable (isPublishReleaseContext).
+      stageGetWindows({ platform, arch: archName, isRelease: isPublishReleaseContext(context, env) })
       console.log(`[before-pack] re-staged get-windows for target ${platform}-${archName}`)
     }
   } catch (err) {

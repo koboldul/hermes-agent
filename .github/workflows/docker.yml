@@ -121,11 +121,35 @@ jobs:
           tags: ${{ env.IMAGE_NAME }}:test
           build-args: |
             HERMES_GIT_SHA=${{ github.sha }}
+            ALLOW_UNVERIFIED_BROWSER=1
           cache-from: ${{ matrix.cache-from }}
           cache-to: ${{ (github.event_name != 'pull_request') && matrix.cache-to || '' }}
 
+      # Record the apt closure of the freshly-built image and upload it as
+      # candidate baseline material. This job never pushes, so this does NOT
+      # weaken the publish gate; it exists so a maintainer can review and seed
+      # supply-chain/apt-closure-<arch>.txt (the pre-push audit's reviewed
+      # baseline). Until seeded, the publish job's pre-push audit fails closed.
+      - name: Record apt closure (candidate baseline material)
+        if: always()
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint sh "${IMAGE_NAME}:test" -c \
+            "dpkg-query -W -f='\${Package}=\${Version}\n' 2>/dev/null | sort" \
+            > "apt-closure-${{ matrix.arch }}.txt"
+          test -s "apt-closure-${{ matrix.arch }}.txt"
+        env:
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
 
-      # Run the docker-integration test suite against the freshly-built
+      - name: Upload apt closure candidate
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: apt-closure-candidate-${{ matrix.arch }}
+          path: apt-closure-${{ matrix.arch }}.txt
+          if-no-files-found: ignore
+
+
       # image already loaded into the local daemon (`:test`).
       #
       # Piggybacking here avoids a second image build: the build step
@@ -206,6 +230,21 @@ jobs:
       - name: Checkout trusted source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
+      # Supply-chain preflight (WP4 items 1 & 7): fail closed BEFORE any push if
+      # the release path would ship/push an unverified executable payload (e.g.
+      # a re-added ALLOW_UNVERIFIED_BROWSER=1, a swallowed apt-closure, or a
+      # release_verified manifest component missing its anchor).
+      - name: Set up Python (publish preflight)
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+      - name: Install preflight deps
+        run: python -m pip install --disable-pip-version-check pyyaml==6.0.2
+      - name: Release-publish supply-chain gate
+        run: |
+          python scripts/ci/check_supply_chain.py
+          python scripts/ci/check_release_publish.py
+
       # Retry once on transient Docker Hub / buildkit pull failures.
       # See build job for rationale; same pattern.
       - name: Set up Docker Buildx
@@ -223,9 +262,15 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # Push by digest only (no tag). The merge job assembles the tagged
-      # manifest list after both architecture publishers complete.
-      - name: Push ${{ matrix.arch }} by digest
+      # Supply-chain (WP4 B4): BUILD ONCE into a content-addressed, push-by-digest
+      # QUARANTINE. The image is pushed by its sha256 digest with NO tag, so it is
+      # unreachable by any consumable name (:latest/:main/:<release>) until the
+      # merge job promotes it. SBOM + max-mode provenance are emitted here so the
+      # attestation is tied to this exact digest. This is the ONLY build in the
+      # publish path — the audit below and the merge job's tag BOTH reference this
+      # same digest, so the audited image is exactly the image that ships and
+      # nothing is ever rebuilt.
+      - name: Build and push release image by digest (quarantine)
         id: push
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
         with:
@@ -234,11 +279,67 @@ jobs:
           platforms: ${{ matrix.platform }}
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
+          # Supply-chain (WP4): the release image is built with NO
+          # ALLOW_UNVERIFIED_BROWSER flag, so the unverified Playwright browser
+          # payload is NOT baked in. Passing it here would ship the exact
+          # unverified payload the policy stops — it is deliberately absent.
           build-args: |
             HERMES_GIT_SHA=${{ github.sha }}
+          # Emit an SBOM and max-mode provenance attestation so every executable
+          # input (base digests, apt packages, Node/npm, Python lock) is recorded
+          # and resolvable from the pushed image. push-by-digest ties the
+          # attestation to the exact quarantine digest audited + tagged below.
+          # Docker closure is NOT claimed on pinned FROM digests alone.
+          sbom: true
+          provenance: mode=max
           outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
           cache-from: ${{ matrix.cache-from }}
           cache-to: ${{ matrix.cache-to }}
+
+      # Supply-chain (WP4 B4): audit the EXACT pushed digest BEFORE it is tagged.
+      # We pull the content-addressed image by its digest (the same bytes the
+      # merge job will tag) and diff its apt closure against the reviewed
+      # baseline. A drift — or a MISSING baseline — fails the job, and because the
+      # digest is still untagged, a failure here means it is never promoted to a
+      # consumable tag. There is NO second build: this audits the image already
+      # pushed above, so the audited closure and the shipped closure are one and
+      # the same.
+      - name: Audit apt closure of the pushed digest (pre-tag gate)
+        env:
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          PUSHED_DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          test -n "$PUSHED_DIGEST"
+          ref="${IMAGE_NAME}@${PUSHED_DIGEST}"
+          docker run --rm --entrypoint sh "$ref" -c \
+            "dpkg-query -W -f='\${Package}=\${Version}\n' 2>/dev/null | sort" \
+            > "apt-closure-${{ matrix.arch }}.txt"
+          test -s "apt-closure-${{ matrix.arch }}.txt"
+          baseline="supply-chain/apt-closure-${{ matrix.arch }}.txt"
+          if [ -f "$baseline" ]; then
+            if ! diff -u "$baseline" "apt-closure-${{ matrix.arch }}.txt"; then
+              echo "::error::apt closure drifted from the reviewed baseline $baseline — failing BEFORE tag/promote." >&2
+              exit 1
+            fi
+            echo "apt closure matches the reviewed baseline $baseline"
+          else
+            echo "::error::no reviewed apt-closure baseline at $baseline — release publish is fail-closed until a maintainer seeds it. This run's closure is uploaded as an artifact; review it and commit it to $baseline to enable this release." >&2
+            exit 1
+          fi
+
+      # The apt closure was captured + audited from the EXACT pushed digest
+      # BEFORE any tag (no second build). Upload it beside the pushed digest so
+      # the release attestation covers the exact package set. Runs even when the
+      # pre-tag audit fails closed (missing/drifted baseline) so a maintainer can
+      # review the recorded closure and seed the baseline.
+      - name: Upload apt closure artifact
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: apt-closure-${{ matrix.arch }}
+          path: apt-closure-${{ matrix.arch }}.txt
+          if-no-files-found: ignore
 
       - name: Export digest
         run: |

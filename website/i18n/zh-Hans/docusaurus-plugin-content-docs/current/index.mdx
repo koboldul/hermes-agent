@@ -51,6 +51,15 @@ import Link from "@docusaurus/Link";
 
 ## 安装
 
+:::warning 前置条件：请先安装 `uv`
+Hermes 使用 [`uv`](https://docs.astral.sh/uv/) 构建其 Python 环境；出于供应链安全考虑，安装程序使用由操作者安装的 `uv`，而不会自动下载它。请在运行下方任何命令前先安装 `uv`（用 `uv --version` 确认）：
+
+- **Linux / macOS / WSL2：** `pipx install uv` 或 `brew install uv`
+- **Windows（原生，PowerShell）：** `winget install astral-sh.uv`
+
+若 `uv`、Node.js 或 Git 缺失，安装程序会停止并给出确切的修复命令。**Android/Termux 例外**（使用 `pip`，而非 `uv`）。详见[安装指南](/getting-started/installation)。
+:::
+
 **Linux / macOS / WSL2**
 
 ```bash

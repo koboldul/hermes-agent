@@ -18,6 +18,17 @@ import pytest
 import tools.lazy_deps as ld
 
 
+@pytest.fixture(autouse=True)
+def _opt_in_unverified(monkeypatch):
+    # Lazy install is now the explicit transport-trusted compatibility path (the
+    # secure default disables unpinned/unhashed installs). Opt in (config gate) so
+    # the existing lazy-install mechanics/security-boundary tests run. Tests that
+    # assert the enforce-disabled behavior override this explicitly.
+    monkeypatch.setattr(
+        "hermes_cli.supply_chain.gate._sc_config", lambda: {"enforce": True, "allow_unverified_components": ["*"]}
+    )
+
+
 # ---------------------------------------------------------------------------
 # Spec safety
 # ---------------------------------------------------------------------------

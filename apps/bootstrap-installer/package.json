@@ -10,13 +10,15 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build",
-    "tauri:build:debug": "tauri build --debug",
+    "tauri:build": "tauri build -- --locked",
+    "tauri:build:debug": "tauri build --debug -- --locked",
+    "tauri:build:release": "node scripts/release-build.mjs",
     "typecheck": "tsc -p . --noEmit",
     "check": "npm run typecheck && npm run lint",
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix",
-    "fix": "npm run lint:fix"
+    "fix": "npm run lint:fix",
+    "test": "node --test scripts/*.test.mjs"
   },
   "dependencies": {
     "@nous-research/ui": "0.18.2",

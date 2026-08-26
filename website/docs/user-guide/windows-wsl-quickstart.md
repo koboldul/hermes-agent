@@ -97,15 +97,17 @@ The `metadata` mount option above is important — without it, files on `/mnt/c/
 
 ### Install Hermes inside WSL
 
-Once you have a WSL2 shell open:
+Once you have a WSL2 shell open, install `uv` first — the installer builds Hermes' Python environment with it and won't auto-download it:
 
 ```bash
+pipx install uv    # or: brew install uv, or see https://docs.astral.sh/uv/getting-started/installation/
+uv --version       # confirm it's on PATH
 curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
 source ~/.bashrc
 hermes
 ```
 
-The installer treats WSL2 as plain Linux — nothing WSL-specific is needed. See [Installation](/getting-started/installation) for the full layout.
+The installer treats WSL2 as plain Linux — nothing WSL-specific is needed. If `uv`, Node.js, or Git are missing it stops with the exact command to install them instead of fetching unverified binaries. See [Installation](/getting-started/installation) for the full layout.
 
 ## Filesystem: crossing the Windows ↔ WSL2 boundary
 

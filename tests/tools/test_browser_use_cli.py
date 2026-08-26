@@ -26,7 +26,11 @@ def _clean_env(monkeypatch):
     monkeypatch.delenv("BU_NAME", raising=False)
     monkeypatch.delenv("BU_AUTOSPAWN", raising=False)
     monkeypatch.delenv("BROWSER_USE_API_KEY", raising=False)
-    yield
+    # browser-use resolution/install is now the explicit transport-trusted
+    # compatibility path; opt in (config gate) so the exec/resolution mechanics run.
+    monkeypatch.setattr(
+        "hermes_cli.supply_chain.gate._sc_config", lambda: {"enforce": True, "allow_unverified_components": ["*"]}
+    )
 
 
 def _fake_cli(tmp_path, body):

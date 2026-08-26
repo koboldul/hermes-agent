@@ -547,6 +547,24 @@ class SkillInstallRequest(BaseModel):
     profile: Optional[str] = None
 
 
+# A4 (Skills XPIA) two-step hub install. ``propose`` fetches+quarantines a hub
+# skill and returns its transport-resolved commit + whole-bundle digest; the
+# trusted parent UI shows those and echoes them back on ``activate``, which
+# re-verifies identity against the SAME quarantined artifact before installing.
+class SkillHubProposeRequest(BaseModel):
+    identifier: str
+    profile: Optional[str] = None
+
+
+class SkillHubActivateRequest(BaseModel):
+    proposal_id: str
+    # The EXACT commit + digest the user confirmed in the trusted UI. Any drift
+    # from the stored proposal fails closed on the server.
+    commit: Optional[str] = None
+    digest: str
+    profile: Optional[str] = None
+
+
 # --- from web_server.py (originally lines 14724-14726) ---
 
 class SkillUninstallRequest(BaseModel):

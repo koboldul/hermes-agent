@@ -72,8 +72,153 @@ _nb_configure_npm_prefix() {
 
 _nb_node_major() {
     local v
-    v=$(node --version 2>/dev/null | sed 's/^v//' | cut -d. -f1)
+    v=$("${1:-node}" --version 2>/dev/null | sed 's/^v//' | cut -d. -f1)
     [[ "$v" =~ ^[0-9]+$ ]] && echo "$v" || echo 0
+}
+
+# ── Managed-artifact provenance markers (WP4 A1 — pre-marker execution) ──────
+# A Hermes-managed Node ($HERMES_HOME/node/bin/{node,npm,npx}) may be EXECUTED —
+# even for a `--version` probe — only when it carries a current provenance
+# marker (<binary>.provenance.json) whose recorded sha256 matches the file's
+# bytes. The marker shape mirrors _sc_verify_managed_marker in
+# scripts/install.sh and hermes_cli/supply_chain/managed.write_marker, so a tree
+# provisioned by any of the three is honoured by the others. This closes the
+# alias-on-PATH gap: _nb_install_bundled_node symlinks $HERMES_HOME/node/bin
+# onto PATH (~/.local/bin), so a bare `node` can otherwise resolve — and this
+# script would execute — an unmarked/tampered managed Node on a later run.
+_nb_sha256() {
+    _nbf="${1:-}"
+    { [ -n "$_nbf" ] && [ -f "$_nbf" ]; } || return 1
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$_nbf" 2>/dev/null | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$_nbf" 2>/dev/null | awk '{print $1}'
+    else
+        return 1
+    fi
+}
+
+_nb_realpath() {
+    _nbp="${1:-}"
+    [ -n "$_nbp" ] || return 1
+    if command -v realpath >/dev/null 2>&1; then
+        realpath "$_nbp" 2>/dev/null && return 0
+    fi
+    if command -v readlink >/dev/null 2>&1; then
+        readlink -f "$_nbp" 2>/dev/null && return 0
+    fi
+    ( cd "$(dirname "$_nbp")" 2>/dev/null && printf '%s/%s' "$(pwd -P)" "$(basename "$_nbp")" ) 2>/dev/null && return 0
+    printf '%s' "$_nbp"
+}
+
+# 0 => <binary> carries a current marker whose sha256 matches its bytes.
+# 1 => unmarked / tampered / unhashable -> caller must NOT execute it.
+_nb_marker_ok() {
+    _nbb="${1:-}"
+    { [ -n "$_nbb" ] && [ -f "$_nbb" ]; } || return 1
+    _nbm="${_nbb}.provenance.json"
+    [ -f "$_nbm" ] || return 1
+    _nbrec=$(awk '
+        /^[[:space:]]*"digest"[[:space:]]*:/ { ind=1 }
+        ind && /"value"[[:space:]]*:/ {
+            if (match($0, /[0-9a-fA-F]{64}/)) { print substr($0, RSTART, RLENGTH); exit }
+        }' "$_nbm" 2>/dev/null)
+    [ -n "$_nbrec" ] || return 1
+    _nbact=$(_nb_sha256 "$_nbb") || return 1
+    [ -n "$_nbact" ] || return 1
+    _nbrec=$(printf '%s' "$_nbrec" | tr 'A-F' 'a-f')
+    _nbact=$(printf '%s' "$_nbact" | tr 'A-F' 'a-f')
+    [ "$_nbrec" = "$_nbact" ] || return 1
+    return 0
+}
+
+_nb_write_marker() {
+    # _nb_write_marker <binary> <version> — atomically record provenance so a
+    # later fast path trusts the binary while still catching tampering.
+    _nbb="${1:-}"; _nbv="${2:-unknown}"
+    { [ -n "$_nbb" ] && [ -f "$_nbb" ]; } || return 1
+    _nbd=$(_nb_sha256 "$_nbb") || return 1
+    [ -n "$_nbd" ] || return 1
+    _nbm="${_nbb}.provenance.json"
+    _nbnow=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "1970-01-01T00:00:00Z")
+    _nbtmp="${_nbm}.tmp.$$"
+    if {
+        printf '{\n'
+        printf '  "component": "node",\n'
+        printf '  "digest": {\n    "algorithm": "sha256",\n    "value": "%s"\n  },\n' "$_nbd"
+        printf '  "marked_at": "%s",\n' "$_nbnow"
+        printf '  "provenance": "operator_compat_opt_in_shell",\n'
+        printf '  "schema": 1,\n'
+        printf '  "version": "%s"\n' "$_nbv"
+        printf '}\n'
+    } > "$_nbtmp" 2>/dev/null; then
+        mv -f "$_nbtmp" "$_nbm" 2>/dev/null && return 0
+    fi
+    rm -f "$_nbtmp" 2>/dev/null
+    return 1
+}
+
+# ── A1 (final): WHOLE-TREE marker enforcement via the bundled Python verifier ─
+# node-bootstrap can hash a single binary (_nb_marker_ok) but not the whole node
+# tree (npm CLI JS — thousands of files) byte-identically to the Python
+# resolver. Stage-Python precedes Node in install.sh, so delegate the SAME
+# tool_marker_ok full-tree algorithm to the bundled stdlib verifier
+# (scripts/ci/node_tree_marker.py). FAIL CLOSED when no usable Python or the
+# verifier script is unavailable — an unverifiable managed tree must never run.
+_nb_python() {
+    for _nbc in "${HERMES_PYTHON:-}" python3 python; do
+        [ -n "$_nbc" ] || continue
+        if command -v "$_nbc" >/dev/null 2>&1; then printf '%s' "$_nbc"; return 0; fi
+    done
+    return 1
+}
+
+_nb_node_marker_script() {
+    _nbdir="${_NB_LIB_DIR:-}"
+    [ -n "$_nbdir" ] || _nbdir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd -P)"
+    _nbs="$_nbdir/../ci/node_tree_marker.py"
+    [ -f "$_nbs" ] && printf '%s' "$_nbs" && return 0
+    return 1
+}
+
+# 0 => the managed node tree carries a current WHOLE-TREE marker (node + npm/npx
+#      + npm CLI JS), verified by the SAME algorithm as the Python resolver.
+# 1 => not verified / no python / no verifier script -> caller must NOT execute.
+_nb_verify_node_whole() {
+    _nbpy=$(_nb_python) || return 1
+    _nbscript=$(_nb_node_marker_script) || return 1
+    "$_nbpy" "$_nbscript" --home "$HERMES_HOME" --verify >/dev/null 2>&1
+}
+
+# Write the whole-tree marker (node + npm/npx + npm CLI JS) after a verified
+# install, BEFORE the tree is executed. REQUIRED for the tree to be trusted on
+# the next resolve — an unmarked tree fails _nb_verify_node_whole (fail closed).
+_nb_write_node_whole() {
+    _nbver="${1:-unknown}"
+    _nbpy=$(_nb_python) || return 1
+    _nbscript=$(_nb_node_marker_script) || return 1
+    "$_nbpy" "$_nbscript" --home "$HERMES_HOME" --write --version "$_nbver" \
+        --provenance operator_compat_opt_in_shell >/dev/null 2>&1
+}
+
+# 0 => <path> canonicalizes INTO a Hermes-managed Node root (this profile's
+# $HERMES_HOME/node, the default $HOME/.hermes/node, and every enumerated
+# $HOME/.hermes/profiles/*/node), independent of the active HERMES_HOME. A
+# PATH/symlink/junction alias that resolves here is the managed Node reached via
+# an alias and must present a marker before use.
+_nb_under_managed_node_root() {
+    _nbcand=$(_nb_realpath "${1:-}") || return 1
+    [ -n "$_nbcand" ] || return 1
+    _nb_um_hit=1
+    for _nbroot in "$HERMES_HOME/node" "$HOME/.hermes/node" "$HOME"/.hermes/profiles/*/node; do
+        [ -d "$_nbroot" ] || continue
+        _nbrootc=$(_nb_realpath "$_nbroot" 2>/dev/null) || _nbrootc="$_nbroot"
+        [ -n "$_nbrootc" ] || continue
+        case "$_nbcand/" in
+            "$_nbrootc"/*) _nb_um_hit=0; break ;;
+        esac
+    done
+    return $_nb_um_hit
 }
 
 # The npm range the checkout's root package.json demands. Read from the
@@ -150,7 +295,7 @@ _nb_ensure_bundled_npm_range() {
             "$npm_bin" install --global \
                 --prefix "$HERMES_HOME/node" \
                 "npm@$range" \
-                --no-fund --no-audit --progress=false >/dev/null 2>&1
+                --ignore-scripts --no-fund --no-audit --progress=false >/dev/null 2>&1
     ); then
         rm -rf "$tmp_cwd"
         _nb_ok "npm $("$npm_bin" --version 2>/dev/null) installed"
@@ -159,13 +304,33 @@ _nb_ensure_bundled_npm_range() {
 
     rm -rf "$tmp_cwd"
     _nb_warn "Could not upgrade bundled npm to $range — \`npm ci\` may fail with EBADENGINE."
-    _nb_warn "Fix manually: npm install -g --prefix \"$HERMES_HOME/node\" npm@\"$range\""
+    _nb_warn "Fix manually: run 'node scripts/ci/install-npm-pinned.mjs' (digest-pinned npm bootstrap; verifies the exact tarball before install)."
     return 1
 }
 
 _nb_have_modern_node() {
-    command -v node >/dev/null 2>&1 || return 1
-    [ "$(_nb_node_major)" -ge "$HERMES_NODE_MIN_VERSION" ]
+    _nbnode=$(command -v node 2>/dev/null) || return 1
+    _nbnpm=$(command -v npm 2>/dev/null) || return 1
+    [ -n "$_nbnode" ] || return 1
+    [ -n "$_nbnpm" ] || return 1
+    # A1: when PATH resolves the Hermes-managed Node (directly or through a
+    # symlink alias into a managed root), it must carry a current marker before
+    # we execute it — even for the --version probe below. The marker lives on
+    # the canonical target ($HERMES_HOME/node/bin/node), not the alias, so hash
+    # the resolved path. A genuine operator/system/version-manager Node is not
+    # under a managed root, so the gate is skipped and it works normally.
+    if _nb_under_managed_node_root "$_nbnode"; then
+        _nbreal=$(_nb_realpath "$_nbnode" 2>/dev/null) || _nbreal="$_nbnode"
+        # A1 (final): a managed Node must pass the per-binary marker AND the
+        # WHOLE-TREE marker (node + npm/npx + npm CLI JS) — verified by the same
+        # algorithm as the Python resolver — before it is executed, even for the
+        # version probe. Fail closed (no python/verifier => reject).
+        _nb_marker_ok "$_nbreal" || return 1
+        _nb_verify_node_whole || return 1
+    fi
+    # Probe the RESOLVED (and, for a managed node, already-verified) path, never
+    # a fresh bare `node` lookup that could resolve elsewhere post-gate.
+    [ "$(_nb_node_major "$_nbnode")" -ge "$HERMES_NODE_MIN_VERSION" ]
 }
 
 # ---------------------------------------------------------------------------
@@ -259,6 +424,13 @@ _nb_install_bundled_node() {
     esac
 
     local index_url="https://nodejs.org/dist/latest-v${HERMES_NODE_TARGET_MAJOR}.x/"
+    # Supply-chain gate (WP4): unverified nodejs.org download runs only when the
+    # internal bootstrap bridge is set (by an --allow-unverified-bootstrap flag
+    # or by Hermes after reading config). Not a user-facing env var.
+    if [ "${_HERMES_SC_BOOTSTRAP_OVERRIDE:-}" != "1" ]; then
+        _nb_warn "Hermes-managed Node.js download is disabled by default (supply-chain enforce). Install Node via your OS/version manager, or re-run the installer with --allow-unverified-bootstrap. See docs/security/supply-chain-migration.md"
+        return 1
+    fi
     local tarball
     tarball=$(curl -fsSL "$index_url" \
         | grep -oE "node-v${HERMES_NODE_TARGET_MAJOR}\.[0-9]+\.[0-9]+-${node_os}-${node_arch}\.tar\.xz" \
@@ -317,11 +489,39 @@ _nb_install_bundled_node() {
 
     export PATH="$HERMES_HOME/node/bin:$PATH"
 
+    # A1: mark the freshly-installed managed tree so later runs (and the Python
+    # resolver / install.sh) trust it, and so the post-install probe below and
+    # every subsequent _nb_have_modern_node pass the managed-alias marker gate.
+    # The node executed here for its version was just downloaded (gated) and
+    # extracted in THIS process, so it is trusted; the marker guards FUTURE
+    # runs. Best-effort — a mark failure leaves the tree reading as unmarked and
+    # it re-heals next time. Mirrors _write_managed_node_marker() on the Python
+    # side and _sc_write_managed_marker in scripts/install.sh.
+    _nb_installed_ver="managed"
+    [ -x "$HERMES_HOME/node/bin/npm" ] && { _nb_write_marker "$HERMES_HOME/node/bin/npm" "$_nb_installed_ver" || true; }
+    [ -x "$HERMES_HOME/node/bin/npx" ] && { _nb_write_marker "$HERMES_HOME/node/bin/npx" "$_nb_installed_ver" || true; }
+    # A1 (final): the WHOLE-TREE marker on node (node + npm/npx + npm CLI JS) is
+    # authoritative and is what the resolver + _nb_have_modern_node require.
+    # Written LAST so it wins over any per-binary node marker. Marker creation
+    # must succeed before the tree executes; it falls back to a per-binary node
+    # marker only when no Python/verifier is available (the runtime heal upgrades
+    # it to whole-tree on first resolve).
+    _nb_write_node_whole "$_nb_installed_ver" || return 1
+    _nb_verify_node_whole || return 1
+
     _nb_have_modern_node || return 1
-    _nb_ok "Node $(node --version) installed to $HERMES_HOME/node/"
+    _nb_installed_ver=$("$HERMES_HOME/node/bin/node" --version 2>/dev/null || echo unknown)
+    _nb_ok "Node $_nb_installed_ver installed to $HERMES_HOME/node/"
     # The tarball's bundled npm is usually below the repo's engines.npm floor.
     # Best-effort: an old npm still beats no Node.
-    _nb_ensure_bundled_npm_range || true
+    if _nb_ensure_bundled_npm_range; then
+        _nb_write_marker "$HERMES_HOME/node/bin/npm" "$_nb_installed_ver" || return 1
+        [ -x "$HERMES_HOME/node/bin/npx" ] && _nb_write_marker "$HERMES_HOME/node/bin/npx" "$_nb_installed_ver"
+        _nb_write_node_whole "$_nb_installed_ver" || return 1
+        _nb_verify_node_whole || return 1
+    else
+        _nb_verify_node_whole || return 1
+    fi
     return 0
 }
 
@@ -364,6 +564,14 @@ _nb_managed_node_outdated() {
 }
 
 _nb_managed_node_needs_heal() {
+    # A1: an unmarked/tampered managed Node anchor is untrusted. Report
+    # "needs heal" WITHOUT executing any managed binary, so heal re-provisions
+    # (and re-marks) the tree instead of probing --version on an unverified one.
+    # Under secure default heal's download is gated, so an unmarked tree is
+    # simply never executed. A marked tree falls through to the real probes.
+    if [ -x "$HERMES_HOME/node/bin/node" ] && { ! _nb_marker_ok "$HERMES_HOME/node/bin/node" || ! _nb_verify_node_whole; }; then
+        return 0
+    fi
     local tool
     for tool in node npm npx; do
         if _nb_managed_tool_broken "$tool"; then
@@ -403,7 +611,7 @@ ensure_node() {
         return 0
     fi
 
-    if [ -x "$HERMES_HOME/node/bin/node" ]; then
+    if [ -x "$HERMES_HOME/node/bin/node" ] && _nb_marker_ok "$HERMES_HOME/node/bin/node" && _nb_verify_node_whole; then
         export PATH="$HERMES_HOME/node/bin:$PATH"
         if _nb_have_modern_node; then
             _nb_ok "Node $(node --version) found (Hermes-managed)"

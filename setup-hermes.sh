@@ -29,6 +29,19 @@ NC='\033[0m'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# Supply-chain (WP4): --allow-unverified-bootstrap opts into the UNVERIFIED
+# installers (uv/Node/etc.) for this run. Secure by default — without it, a
+# missing tool must come from your OS/version manager. This sets an INTERNAL
+# bridge consumed by the gate; it is not a user-facing environment variable.
+for _sc_arg in "$@"; do
+    case "$_sc_arg" in
+        --allow-unverified-bootstrap)
+            export _HERMES_SC_BOOTSTRAP_OVERRIDE=1
+            echo -e "${YELLOW}⚠${NC} --allow-unverified-bootstrap: running UNVERIFIED transport-trusted installers (not release-verified)."
+            ;;
+    esac
+done
+
 # Prevent uv from discovering config files (uv.toml, pyproject.toml) from the
 # wrong user's home directory when running under sudo -u <user>.  See #21269.
 export UV_NO_CONFIG=1
@@ -81,7 +94,17 @@ else
         UV_VERSION=$($UV_CMD --version 2>/dev/null)
         echo -e "${GREEN}✓${NC} uv found ($UV_VERSION)"
     else
-        echo -e "${CYAN}→${NC} Installing uv..."
+        # Supply-chain gate (WP4): the astral uv installer is fetched and
+        # executed from a mutable, unverified source. Secure by default — it
+        # runs only when --allow-unverified-bootstrap was passed.
+        if [ "${_HERMES_SC_BOOTSTRAP_OVERRIDE:-}" != "1" ]; then
+            echo -e "${RED}✗${NC} Automatic uv install is disabled by default (supply-chain enforce)."
+            echo -e "${CYAN}→${NC} Install uv with your OS/version manager (pipx/brew/winget) and re-run,"
+            echo -e "${CYAN}→${NC} or re-run: ./setup-hermes.sh --allow-unverified-bootstrap"
+            echo -e "${CYAN}→${NC} Manual: https://docs.astral.sh/uv/ (see docs/security/supply-chain-migration.md)"
+            exit 1
+        fi
+        echo -e "${CYAN}→${NC} Installing uv (UNVERIFIED compatibility bootstrap; opted in)..."
         # Capture installer output so a failure shows the user WHY
         # (network, glibc mismatch on old distros, missing curl, disk
         # full, etc.) instead of "✗ Failed to install uv" with zero
@@ -193,25 +216,50 @@ echo -e "${CYAN}→${NC} Installing dependencies..."
 if is_termux; then
     export ANDROID_API_LEVEL="$(getprop ro.build.version.sdk 2>/dev/null || printf '%s' "${ANDROID_API_LEVEL:-}")"
     echo -e "${CYAN}→${NC} Termux detected — installing the tested Android bundle"
-    "$SETUP_PYTHON" -m pip install --upgrade pip setuptools wheel
-    if [ -f "constraints-termux.txt" ]; then
-        "$SETUP_PYTHON" -m pip install -e ".[termux]" -c constraints-termux.txt || {
-            echo -e "${YELLOW}⚠${NC} Termux bundle install failed, falling back to base install..."
-            "$SETUP_PYTHON" -m pip install -e "." -c constraints-termux.txt
-        }
-    else
-        "$SETUP_PYTHON" -m pip install -e ".[termux]" || "$SETUP_PYTHON" -m pip install -e "."
+    # A7: the Termux pip path is version-constrained (constraints-termux.txt),
+    # NOT hash-locked (--require-hashes), so a compromised wheel/sdist that still
+    # satisfies the version pin would not be rejected, and no committed hashed
+    # graph exists. Under the secure default this whole path is disabled — it
+    # EXITS BEFORE any pip upgrade/install unless the operator opted into
+    # unverified bootstrap (--allow-unverified-bootstrap), or a committed
+    # --require-hashes graph is present.
+    _termux_hashed_graph="requirements-termux.hashes.txt"
+    if [ "${_HERMES_SC_BOOTSTRAP_OVERRIDE:-}" != "1" ] && \
+       ! { [ -f "$_termux_hashed_graph" ] && grep -q -- '--hash=sha256:' "$_termux_hashed_graph" 2>/dev/null; }; then
+        echo -e "${RED}✗${NC} Termux dependency install is disabled by default (supply-chain enforce): the Android pip path is version-constrained, not hash-locked, and no --require-hashes graph is committed."
+        echo -e "${CYAN}→${NC} Provision a hash-locked Termux venv yourself, or re-run: ./setup-hermes.sh --allow-unverified-bootstrap. See docs/security/supply-chain-migration.md"
+        exit 1
     fi
-    echo -e "${GREEN}✓${NC} Dependencies installed"
+    "$SETUP_PYTHON" -m pip install --upgrade pip setuptools wheel
+    # Supply-chain (WP4): the constrained install (constraints-termux.txt) is
+    # authoritative. Unconstrained/unpinned fallbacks re-resolve fresh from PyPI
+    # and are disabled by default — they require --allow-unverified-bootstrap.
+    if [ -f "constraints-termux.txt" ]; then
+        if "$SETUP_PYTHON" -m pip install -e ".[termux]" -c constraints-termux.txt; then
+            echo -e "${GREEN}✓${NC} Dependencies installed (constraints-termux.txt)"
+        elif [ "${_HERMES_SC_BOOTSTRAP_OVERRIDE:-}" = "1" ]; then
+            echo -e "${YELLOW}⚠${NC} Termux bundle install failed; --allow-unverified-bootstrap set — base install (unpinned)"
+            "$SETUP_PYTHON" -m pip install -e "." -c constraints-termux.txt
+        else
+            echo -e "${RED}✗${NC} Termux dependency install failed and the unpinned fallback is disabled by default (supply-chain enforce)."
+            echo -e "${CYAN}→${NC} Re-run: ./setup-hermes.sh --allow-unverified-bootstrap (see docs/security/supply-chain-migration.md)"
+            exit 1
+        fi
+    elif [ "${_HERMES_SC_BOOTSTRAP_OVERRIDE:-}" = "1" ]; then
+        echo -e "${YELLOW}⚠${NC} constraints-termux.txt missing; --allow-unverified-bootstrap set — unpinned install"
+        "$SETUP_PYTHON" -m pip install -e ".[termux]" || "$SETUP_PYTHON" -m pip install -e "."
+        echo -e "${GREEN}✓${NC} Dependencies installed (unpinned)"
+    else
+        echo -e "${RED}✗${NC} constraints-termux.txt missing and an unpinned install is disabled by default (supply-chain enforce)."
+        echo -e "${CYAN}→${NC} Restore constraints-termux.txt or re-run ./setup-hermes.sh --allow-unverified-bootstrap. See docs/security/supply-chain-migration.md"
+        exit 1
+    fi
 else
-    # Prefer uv sync with lockfile (hash-verified installs) when available,
-    # fall back to pip install for compatibility or when lockfile is stale.
-    #
-    # Multi-tier pip fallback. Goal: ONE compromised PyPI package
-    # (mistralai 2.4.6 in May 2026 → quarantined) shouldn't silently demote
-    # a fresh setup to "core only". Edit _BROKEN_EXTRAS when a transitive
-    # breaks; users keep voice / honcho / google / slack / matrix etc. even
-    # if mistral can't resolve.
+    # Supply-chain (WP4): `uv sync --extra all --locked` (hash-verified) is the
+    # authoritative install. The unhashed pip re-resolve fallback re-resolves
+    # transitives fresh from PyPI and is disabled by default — it requires
+    # --allow-unverified-bootstrap. No bare/ranged/unhashed fallback runs under
+    # the secure default.
     _BROKEN_EXTRAS=()  # populate when an extra becomes unresolvable
     _ALL_EXTRAS=(
         modal daytona vercel messaging matrix cron cli dev tts-premium slack
@@ -232,37 +280,31 @@ else
             || $UV_CMD pip install -e "$_SAFE_SPEC" \
             || $UV_CMD pip install -e "."
     }
+    _unhashed_fallback() {
+        if [ "${_HERMES_SC_BOOTSTRAP_OVERRIDE:-}" = "1" ]; then
+            echo -e "${YELLOW}⚠${NC} --allow-unverified-bootstrap set — re-resolving from PyPI (transitives NOT hash-verified)."
+            _try_install
+            echo -e "${GREEN}✓${NC} Dependencies installed (transitives re-resolved, not hash-verified)"
+        else
+            echo -e "${RED}✗${NC} Hash-verified install unavailable and the unhashed fallback is disabled by default (supply-chain enforce)."
+            echo -e "${CYAN}→${NC} Restore/refresh uv.lock (uv lock), or re-run ./setup-hermes.sh --allow-unverified-bootstrap."
+            echo -e "${CYAN}→${NC} See docs/security/supply-chain-migration.md"
+            exit 1
+        fi
+    }
 
     if [ -f "uv.lock" ]; then
-        # Hash-verified install (preferred). The lockfile records SHA256
-        # hashes for every transitive — a compromised transitive would have
-        # a different hash and be REJECTED by uv. This is the only path
-        # that protects against transitive-package supply-chain attacks
-        # (the direct deps in pyproject.toml are exact-pinned, but
-        # `uv pip install` re-resolves transitives fresh from PyPI).
         echo -e "${CYAN}→${NC} Using uv.lock for hash-verified installation..."
         echo -e "${CYAN}→${NC} (first run on a fresh venv can take 1-5 minutes; uv prints progress below)"
-        # Critical flag choice: `--extra all`, NOT `--all-extras`. The
-        # latter installs every [project.optional-dependencies] key,
-        # bypassing the curated [all] extra and pulling backends like
-        # [matrix] (python-olm needs make on Windows) and [rl] (git+https
-        # deps that fail offline). See pyproject.toml's [all] for the
-        # curated set, and tools/lazy_deps.py for backends that install
-        # at first use.
-        # Also: stream stderr through directly so the user sees uv's
-        # progress UI instead of staring at a frozen prompt.
         if UV_PROJECT_ENVIRONMENT="$SCRIPT_DIR/venv" $UV_CMD sync --extra all --locked; then
             echo -e "${GREEN}✓${NC} Dependencies installed (hash-verified via uv.lock)"
         else
             echo -e "${YELLOW}⚠${NC} Lockfile sync failed (see uv output above)."
-            echo -e "${YELLOW}⚠${NC} Falling back to PyPI resolve — transitives will NOT be hash-verified."
-            _try_install
-            echo -e "${GREEN}✓${NC} Dependencies installed (transitives re-resolved, not hash-verified)"
+            _unhashed_fallback
         fi
     else
-        echo -e "${YELLOW}⚠${NC} uv.lock not found — installing without hash verification of transitives."
-        _try_install
-        echo -e "${GREEN}✓${NC} Dependencies installed (transitives re-resolved, not hash-verified)"
+        echo -e "${YELLOW}⚠${NC} uv.lock not found."
+        _unhashed_fallback
     fi
 fi
 

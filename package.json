@@ -12,10 +12,10 @@
   ],
   "scripts": {
     "postinstall": "echo '\u2705 Node dependencies installed. Run: python run_agent.py --help'",
-    "install:root": "npm install --workspaces=false",
-    "install:web": "npm install --workspace web",
-    "install:tui": "npm install --workspace ui-tui",
-    "install:desktop": "npm install --workspace apps/desktop",
+    "install:root": "npm install --workspaces=false --ignore-scripts && node apps/desktop/scripts/run-allowed-lifecycle.mjs",
+    "install:web": "npm install --workspace web --ignore-scripts && node apps/desktop/scripts/run-allowed-lifecycle.mjs",
+    "install:tui": "npm install --workspace ui-tui --ignore-scripts && node apps/desktop/scripts/run-allowed-lifecycle.mjs",
+    "install:desktop": "npm install --workspace apps/desktop --ignore-scripts && node apps/desktop/scripts/run-allowed-lifecycle.mjs",
     "audit:root": "npm audit --workspaces=false",
     "audit:web": "npm audit --workspace web",
     "audit:tui": "npm audit --workspace ui-tui",
@@ -70,6 +70,6 @@
     "electron@41.10.3": true,
     "fsevents@2.3.2": true,
     "fsevents@2.3.3": true,
-    "get-windows@9.3.0": true
+    "get-windows@9.3.0": false
   }
 }

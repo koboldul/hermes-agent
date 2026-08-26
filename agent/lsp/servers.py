@@ -163,7 +163,7 @@ class ServerContext:
     """
 
     workspace_root: str
-    install_strategy: str = "auto"  # "auto" | "manual" | "off"
+    install_strategy: str = "manual"  # "auto" (consent-gated) | "manual" | "off"
     binary_overrides: Dict[str, List[str]] = field(default_factory=dict)
     env_overrides: Dict[str, Dict[str, str]] = field(default_factory=dict)
     init_overrides: Dict[str, Dict[str, Any]] = field(default_factory=dict)
@@ -172,6 +172,45 @@ class ServerContext:
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+
+
+def build_server_env_policy(command: Sequence[str]):
+    """Return the restricted-environment policy for a language-server spawn.
+
+    Language servers never receive an inherited ``os.environ`` (SEC-AUDIT-002).
+    A *managed* binary (installed under ``HERMES_HOME/lsp``) runs on a
+    controlled PATH: its own directory, the Hermes-managed runtime dirs, and
+    the resolved toolchain directories (``go``/``node``/``npm``) so it can find
+    its interpreter/compiler.  An *operator ``PATH``* binary additionally keeps
+    the operator's inherited PATH, because the operator explicitly owns that
+    trust decision.  Neither path inherits credentials, agent sockets, or
+    package-manager configuration.
+    """
+    from agent.lsp.restricted_env import LSPEnvPolicy
+
+    bin_path = command[0] if command else ""
+    bin_dir = os.path.dirname(bin_path)
+    managed = False
+    try:
+        from agent.lsp.install import hermes_lsp_root
+
+        root = os.path.normcase(str(hermes_lsp_root()))
+        if bin_dir and os.path.normcase(os.path.abspath(bin_dir)).startswith(root):
+            managed = True
+    except Exception:
+        managed = False
+
+    path_entries: List[str] = []
+    if bin_dir:
+        path_entries.append(bin_dir)
+    for tool in ("go", "node", "npm"):
+        resolved = shutil.which(tool)
+        if resolved:
+            path_entries.append(os.path.dirname(resolved))
+    return LSPEnvPolicy(
+        path_entries=tuple(path_entries),
+        include_inherited_path=not managed,
+    )
 
 
 def _file_ext_or_basename(path: str) -> str:
@@ -230,14 +269,14 @@ def _root_or_workspace(file_path: str, workspace: str, markers: Sequence[str], e
 
 
 def _spawn_pyright(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
-    bin_path = _resolve_override(ctx, "pyright") or _which(
-        "pyright-langserver", "pyright"
+    bin_path = _resolve_server_binary(
+        ctx,
+        pkg="pyright",
+        override_id="pyright",
+        path_names=("pyright-langserver", "pyright"),
     )
     if bin_path is None:
-        from agent.lsp.install import try_install
-        bin_path = try_install("pyright", ctx.install_strategy)
-        if bin_path is None:
-            return None
+        return None
     # If we got the cli ``pyright``, the langserver is its sibling.
     base = os.path.basename(bin_path)
     if base in {"pyright", "pyright.exe"}:
@@ -275,12 +314,14 @@ def _detect_python(root: str) -> Optional[str]:
 
 
 def _spawn_typescript(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
-    bin_path = _resolve_override(ctx, "typescript") or _which("typescript-language-server")
+    bin_path = _resolve_server_binary(
+        ctx,
+        pkg="typescript-language-server",
+        override_id="typescript",
+        path_names=("typescript-language-server",),
+    )
     if bin_path is None:
-        from agent.lsp.install import try_install
-        bin_path = try_install("typescript-language-server", ctx.install_strategy)
-        if bin_path is None:
-            return None
+        return None
     return SpawnSpec(
         command=[bin_path, "--stdio"],
         workspace_root=root,
@@ -292,12 +333,11 @@ def _spawn_typescript(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
 
 
 def _spawn_gopls(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
-    bin_path = _resolve_override(ctx, "gopls") or _which("gopls")
+    bin_path = _resolve_server_binary(
+        ctx, pkg="gopls", override_id="gopls", path_names=("gopls",)
+    )
     if bin_path is None:
-        from agent.lsp.install import try_install
-        bin_path = try_install("gopls", ctx.install_strategy)
-        if bin_path is None:
-            return None
+        return None
     return SpawnSpec(
         command=[bin_path],
         workspace_root=root,
@@ -308,12 +348,14 @@ def _spawn_gopls(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
 
 
 def _spawn_rust_analyzer(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
-    bin_path = _resolve_override(ctx, "rust-analyzer") or _which("rust-analyzer")
+    bin_path = _resolve_server_binary(
+        ctx,
+        pkg="rust-analyzer",
+        override_id="rust-analyzer",
+        path_names=("rust-analyzer",),
+    )
     if bin_path is None:
-        from agent.lsp.install import try_install
-        bin_path = try_install("rust-analyzer", ctx.install_strategy)
-        if bin_path is None:
-            return None
+        return None
     return SpawnSpec(
         command=[bin_path],
         workspace_root=root,
@@ -324,12 +366,11 @@ def _spawn_rust_analyzer(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
 
 
 def _spawn_clangd(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
-    bin_path = _resolve_override(ctx, "clangd") or _which("clangd")
+    bin_path = _resolve_server_binary(
+        ctx, pkg="clangd", override_id="clangd", path_names=("clangd",)
+    )
     if bin_path is None:
-        from agent.lsp.install import try_install
-        bin_path = try_install("clangd", ctx.install_strategy)
-        if bin_path is None:
-            return None
+        return None
     return SpawnSpec(
         command=[bin_path, "--background-index", "--clang-tidy"],
         workspace_root=root,
@@ -343,12 +384,14 @@ _BASH_SHELLCHECK_WARNED = False
 
 
 def _spawn_bash_ls(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
-    bin_path = _resolve_override(ctx, "bash-language-server") or _which("bash-language-server")
+    bin_path = _resolve_server_binary(
+        ctx,
+        pkg="bash-language-server",
+        override_id="bash-language-server",
+        path_names=("bash-language-server",),
+    )
     if bin_path is None:
-        from agent.lsp.install import try_install
-        bin_path = try_install("bash-language-server", ctx.install_strategy)
-        if bin_path is None:
-            return None
+        return None
     # bash-language-server delegates diagnostics to ``shellcheck``.  Without
     # it on PATH the server starts and accepts requests but never reports
     # any problems — to the user it looks like a working integration that
@@ -371,12 +414,14 @@ def _spawn_bash_ls(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
 
 
 def _spawn_yaml_ls(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
-    bin_path = _resolve_override(ctx, "yaml-language-server") or _which("yaml-language-server")
+    bin_path = _resolve_server_binary(
+        ctx,
+        pkg="yaml-language-server",
+        override_id="yaml-language-server",
+        path_names=("yaml-language-server",),
+    )
     if bin_path is None:
-        from agent.lsp.install import try_install
-        bin_path = try_install("yaml-language-server", ctx.install_strategy)
-        if bin_path is None:
-            return None
+        return None
     return SpawnSpec(
         command=[bin_path, "--stdio"],
         workspace_root=root,
@@ -387,12 +432,14 @@ def _spawn_yaml_ls(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
 
 
 def _spawn_lua_ls(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
-    bin_path = _resolve_override(ctx, "lua-language-server") or _which("lua-language-server")
+    bin_path = _resolve_server_binary(
+        ctx,
+        pkg="lua-language-server",
+        override_id="lua-language-server",
+        path_names=("lua-language-server",),
+    )
     if bin_path is None:
-        from agent.lsp.install import try_install
-        bin_path = try_install("lua-language-server", ctx.install_strategy)
-        if bin_path is None:
-            return None
+        return None
     return SpawnSpec(
         command=[bin_path],
         workspace_root=root,
@@ -403,12 +450,14 @@ def _spawn_lua_ls(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
 
 
 def _spawn_intelephense(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
-    bin_path = _resolve_override(ctx, "intelephense") or _which("intelephense")
+    bin_path = _resolve_server_binary(
+        ctx,
+        pkg="intelephense",
+        override_id="intelephense",
+        path_names=("intelephense",),
+    )
     if bin_path is None:
-        from agent.lsp.install import try_install
-        bin_path = try_install("intelephense", ctx.install_strategy)
-        if bin_path is None:
-            return None
+        return None
     init = {"telemetry": {"enabled": False}}
     init.update(ctx.init_overrides.get("intelephense", {}))
     return SpawnSpec(
@@ -421,7 +470,9 @@ def _spawn_intelephense(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
 
 
 def _spawn_ocamllsp(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
-    bin_path = _resolve_override(ctx, "ocaml-lsp") or _which("ocamllsp")
+    bin_path = _resolve_server_binary(
+        ctx, pkg="ocaml-lsp", override_id="ocaml-lsp", path_names=("ocamllsp",)
+    )
     if bin_path is None:
         return None
     return SpawnSpec(
@@ -434,12 +485,14 @@ def _spawn_ocamllsp(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
 
 
 def _spawn_dockerfile_ls(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
-    bin_path = _resolve_override(ctx, "dockerfile-ls") or _which("docker-langserver")
+    bin_path = _resolve_server_binary(
+        ctx,
+        pkg="dockerfile-language-server-nodejs",
+        override_id="dockerfile-ls",
+        path_names=("docker-langserver",),
+    )
     if bin_path is None:
-        from agent.lsp.install import try_install
-        bin_path = try_install("dockerfile-language-server-nodejs", ctx.install_strategy)
-        if bin_path is None:
-            return None
+        return None
     return SpawnSpec(
         command=[bin_path, "--stdio"],
         workspace_root=root,
@@ -450,7 +503,9 @@ def _spawn_dockerfile_ls(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
 
 
 def _spawn_terraform_ls(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
-    bin_path = _resolve_override(ctx, "terraform-ls") or _which("terraform-ls")
+    bin_path = _resolve_server_binary(
+        ctx, pkg="terraform-ls", override_id="terraform-ls", path_names=("terraform-ls",)
+    )
     if bin_path is None:
         return None  # terraform-ls is heavy to auto-install; require user
     init = {
@@ -470,7 +525,9 @@ def _spawn_terraform_ls(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
 
 
 def _spawn_dart(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
-    bin_path = _resolve_override(ctx, "dart") or _which("dart")
+    bin_path = _resolve_server_binary(
+        ctx, pkg="dart", override_id="dart", path_names=("dart",)
+    )
     if bin_path is None:
         return None
     return SpawnSpec(
@@ -483,8 +540,11 @@ def _spawn_dart(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
 
 
 def _spawn_haskell_ls(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
-    bin_path = _resolve_override(ctx, "haskell-language-server") or _which(
-        "haskell-language-server-wrapper", "haskell-language-server"
+    bin_path = _resolve_server_binary(
+        ctx,
+        pkg="haskell-language-server",
+        override_id="haskell-language-server",
+        path_names=("haskell-language-server-wrapper", "haskell-language-server"),
     )
     if bin_path is None:
         return None
@@ -498,7 +558,9 @@ def _spawn_haskell_ls(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
 
 
 def _spawn_julia(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
-    bin_path = _resolve_override(ctx, "julia") or _which("julia")
+    bin_path = _resolve_server_binary(
+        ctx, pkg="julia", override_id="julia", path_names=("julia",)
+    )
     if bin_path is None:
         return None
     return SpawnSpec(
@@ -517,7 +579,9 @@ def _spawn_julia(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
 
 
 def _spawn_clojure_lsp(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
-    bin_path = _resolve_override(ctx, "clojure-lsp") or _which("clojure-lsp")
+    bin_path = _resolve_server_binary(
+        ctx, pkg="clojure-lsp", override_id="clojure-lsp", path_names=("clojure-lsp",)
+    )
     if bin_path is None:
         return None
     return SpawnSpec(
@@ -530,7 +594,9 @@ def _spawn_clojure_lsp(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
 
 
 def _spawn_nixd(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
-    bin_path = _resolve_override(ctx, "nixd") or _which("nixd")
+    bin_path = _resolve_server_binary(
+        ctx, pkg="nixd", override_id="nixd", path_names=("nixd",)
+    )
     if bin_path is None:
         return None
     return SpawnSpec(
@@ -543,7 +609,9 @@ def _spawn_nixd(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
 
 
 def _spawn_zls(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
-    bin_path = _resolve_override(ctx, "zls") or _which("zls")
+    bin_path = _resolve_server_binary(
+        ctx, pkg="zls", override_id="zls", path_names=("zls",)
+    )
     if bin_path is None:
         return None
     return SpawnSpec(
@@ -556,7 +624,9 @@ def _spawn_zls(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
 
 
 def _spawn_gleam(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
-    bin_path = _resolve_override(ctx, "gleam") or _which("gleam")
+    bin_path = _resolve_server_binary(
+        ctx, pkg="gleam", override_id="gleam", path_names=("gleam",)
+    )
     if bin_path is None:
         return None
     return SpawnSpec(
@@ -569,7 +639,12 @@ def _spawn_gleam(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
 
 
 def _spawn_elixir_ls(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
-    bin_path = _resolve_override(ctx, "elixir-ls") or _which("elixir-ls", "language_server.sh")
+    bin_path = _resolve_server_binary(
+        ctx,
+        pkg="elixir-ls",
+        override_id="elixir-ls",
+        path_names=("elixir-ls", "language_server.sh"),
+    )
     if bin_path is None:
         return None
     return SpawnSpec(
@@ -582,7 +657,9 @@ def _spawn_elixir_ls(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
 
 
 def _spawn_prisma(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
-    bin_path = _resolve_override(ctx, "prisma") or _which("prisma")
+    bin_path = _resolve_server_binary(
+        ctx, pkg="prisma", override_id="prisma", path_names=("prisma",)
+    )
     if bin_path is None:
         return None
     return SpawnSpec(
@@ -595,8 +672,11 @@ def _spawn_prisma(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
 
 
 def _spawn_kotlin_ls(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
-    bin_path = _resolve_override(ctx, "kotlin-language-server") or _which(
-        "kotlin-language-server"
+    bin_path = _resolve_server_binary(
+        ctx,
+        pkg="kotlin-language-server",
+        override_id="kotlin-language-server",
+        path_names=("kotlin-language-server",),
     )
     if bin_path is None:
         return None
@@ -613,7 +693,9 @@ def _spawn_jdtls(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
     # jdtls has a complex install flow.  We require a manual install
     # for now and look for the wrapper script that the jdtls install
     # produces.
-    bin_path = _resolve_override(ctx, "jdtls") or _which("jdtls")
+    bin_path = _resolve_server_binary(
+        ctx, pkg="jdtls", override_id="jdtls", path_names=("jdtls",)
+    )
     if bin_path is None:
         return None
     return SpawnSpec(
@@ -626,14 +708,14 @@ def _spawn_jdtls(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
 
 
 def _spawn_vue(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
-    bin_path = _resolve_override(ctx, "vue-language-server") or _which(
-        "vue-language-server"
+    bin_path = _resolve_server_binary(
+        ctx,
+        pkg="@vue/language-server",
+        override_id="vue-language-server",
+        path_names=("vue-language-server",),
     )
     if bin_path is None:
-        from agent.lsp.install import try_install
-        bin_path = try_install("@vue/language-server", ctx.install_strategy)
-        if bin_path is None:
-            return None
+        return None
     return SpawnSpec(
         command=[bin_path, "--stdio"],
         workspace_root=root,
@@ -644,14 +726,14 @@ def _spawn_vue(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
 
 
 def _spawn_svelte(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
-    bin_path = _resolve_override(ctx, "svelte-language-server") or _which(
-        "svelteserver", "svelte-language-server"
+    bin_path = _resolve_server_binary(
+        ctx,
+        pkg="svelte-language-server",
+        override_id="svelte-language-server",
+        path_names=("svelteserver", "svelte-language-server"),
     )
     if bin_path is None:
-        from agent.lsp.install import try_install
-        bin_path = try_install("svelte-language-server", ctx.install_strategy)
-        if bin_path is None:
-            return None
+        return None
     return SpawnSpec(
         command=[bin_path, "--stdio"],
         workspace_root=root,
@@ -662,14 +744,14 @@ def _spawn_svelte(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
 
 
 def _spawn_astro(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
-    bin_path = _resolve_override(ctx, "astro-language-server") or _which(
-        "astro-ls", "astro-language-server"
+    bin_path = _resolve_server_binary(
+        ctx,
+        pkg="@astrojs/language-server",
+        override_id="astro-language-server",
+        path_names=("astro-ls", "astro-language-server"),
     )
     if bin_path is None:
-        from agent.lsp.install import try_install
-        bin_path = try_install("@astrojs/language-server", ctx.install_strategy)
-        if bin_path is None:
-            return None
+        return None
     return SpawnSpec(
         command=[bin_path, "--stdio"],
         workspace_root=root,
@@ -733,31 +815,60 @@ def _find_pses_bundle(ctx: ServerContext) -> Optional[str]:
 def _spawn_powershell_es(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
     """Spawn PowerShellEditorServices over stdio.
 
-    Unlike the single-binary servers, PSES is a PowerShell module driven
-    by a bootstrap script.  We need both a PowerShell host (``pwsh`` for
-    PowerShell 7+, or Windows ``powershell``) and the PSES module bundle.
-    The bundle is manual-install (release zip) — see ``_find_pses_bundle``.
+    PSES is a *compound* server: it needs both a PowerShell host interpreter
+    (``pwsh``/``powershell``) AND the PSES ``Start-EditorServices.ps1``
+    bootstrap script.  SEC-AUDIT-002 Alert 1: neither component is exempt.
+
+    * **Manual mode** (operator owns the trust decision): the host is resolved
+      from ``PATH`` and the bundle from config command / init override /
+      ``PSES_BUNDLE_PATH`` / the ``HERMES_HOME`` staging dir.
+    * **Effective auto**: both the host executable and the bootstrap script
+      must be exact-path + digest re-approved (``hermes lsp approve powershell
+      --host <pwsh> --script <Start-EditorServices.ps1>``) or provenance-managed
+      — a raw ``PATH`` host, a config/env bundle path, and an unmarked
+      ``HERMES_HOME`` bundle are all refused, and any mutation of either
+      component invalidates the approval.
     """
-    pwsh = _which("pwsh", "powershell")
-    if pwsh is None:
-        return None
-    bundle = _find_pses_bundle(ctx)
-    if bundle is None:
-        global _PSES_BUNDLE_WARNED
-        if not _PSES_BUNDLE_WARNED:
-            _PSES_BUNDLE_WARNED = True
-            logger.warning(
-                "powershell: pwsh found but the PowerShellEditorServices "
-                "bundle is missing. Download the release zip from "
-                "https://github.com/PowerShell/PowerShellEditorServices/releases, "
-                "extract it, and either set lsp.servers.powershell.command "
-                "to the bundle path or unzip it to "
-                "<HERMES_HOME>/lsp/PowerShellEditorServices."
-            )
-        return None
-    start_script = os.path.join(
-        bundle, "PowerShellEditorServices", "Start-EditorServices.ps1"
+    from agent.lsp.install import resolve_compound_components
+
+    def _manual_components() -> Optional[Dict[str, str]]:
+        pwsh_path = _which("pwsh", "powershell")
+        if pwsh_path is None:
+            return None
+        bundle_dir = _find_pses_bundle(ctx)
+        if bundle_dir is None:
+            global _PSES_BUNDLE_WARNED
+            if not _PSES_BUNDLE_WARNED:
+                _PSES_BUNDLE_WARNED = True
+                logger.warning(
+                    "powershell: pwsh found but the PowerShellEditorServices "
+                    "bundle is missing. Download the release zip from "
+                    "https://github.com/PowerShell/PowerShellEditorServices/releases, "
+                    "extract it, and either set lsp.servers.powershell.command "
+                    "to the bundle path or unzip it to "
+                    "<HERMES_HOME>/lsp/PowerShellEditorServices."
+                )
+            return None
+        script = os.path.join(
+            bundle_dir, "PowerShellEditorServices", "Start-EditorServices.ps1"
+        )
+        if not os.path.isfile(script):
+            return None
+        return {"host": pwsh_path, "script": script}
+
+    resolved = resolve_compound_components(
+        "powershell",
+        ctx.install_strategy,
+        manual_fn=_manual_components,
+        required=("host", "script"),
     )
+    if resolved is None:
+        return None
+
+    pwsh = resolved["host"]
+    start_script = resolved["script"]
+    # bundle root = <bundle>/PowerShellEditorServices/Start-EditorServices.ps1
+    bundle = os.path.dirname(os.path.dirname(start_script))
     # Session details file: PSES writes connection info here on startup.
     session_path = os.path.join(
         hermes_lsp_session_dir(), f"pses-session-{os.getpid()}.json"
@@ -804,12 +915,43 @@ def hermes_lsp_session_dir() -> str:
     return d
 
 
-def _resolve_override(ctx: ServerContext, server_id: str) -> Optional[str]:
-    """User can pin a binary path in config."""
+def _config_command_override(ctx: ServerContext, server_id: str) -> Optional[str]:
+    """Return the raw config ``command`` override path (existence unchecked).
+
+    The strategy-aware resolver in :mod:`agent.lsp.install` decides whether the
+    override may be executed (operator-owned in manual; digest-reapproved in
+    auto), so this returns the raw pin without pre-filtering.
+    """
     override = ctx.binary_overrides.get(server_id)
-    if override and override[0] and os.path.exists(override[0]):
-        return override[0]
+    if override and override[0]:
+        return str(override[0])
     return None
+
+
+def _resolve_server_binary(
+    ctx: ServerContext,
+    *,
+    pkg: str,
+    override_id: str,
+    path_names: Tuple[str, ...],
+) -> Optional[str]:
+    """Central, strategy-aware binary resolution for every server builder.
+
+    All builders funnel through :func:`agent.lsp.install.resolve_binary` so the
+    "effective auto never trusts arbitrary PATH" policy (SEC-AUDIT-002 Alert 2)
+    is enforced in exactly one place.  ``override_id`` keys the config
+    ``command`` override (the registry server id), while ``pkg`` keys the
+    manifest recipe / provenance markers (which may differ, e.g.
+    ``vue-language-server`` → ``@vue/language-server``).
+    """
+    from agent.lsp.install import resolve_binary
+
+    return resolve_binary(
+        pkg,
+        ctx.install_strategy,
+        path_names=path_names,
+        command_override=_config_command_override(ctx, override_id),
+    )
 
 
 # ---------------------------------------------------------------------------

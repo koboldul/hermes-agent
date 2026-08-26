@@ -182,6 +182,11 @@ class DistributionManifest:
     # ``list`` can show when a distribution landed on disk.  Empty for
     # manifests that ship in a repo (authors don't populate this).
     installed_at: str = ""
+    # Supply-chain (WP4 item 4): deterministic sha256 over the staged
+    # distribution tree, recorded at install/update alongside the resolved
+    # commit (in ``source`` as ``url#<sha>``). Binds the activated bytes to an
+    # exact identity so a later update to a different digest is detectable.
+    bundle_sha256: str = ""
 
     @classmethod
     def from_dict(cls, data: Any) -> "DistributionManifest":
@@ -211,6 +216,7 @@ class DistributionManifest:
             distribution_owned=distribution_owned,
             source=str(data.get("source") or ""),
             installed_at=str(data.get("installed_at") or ""),
+            bundle_sha256=str(data.get("bundle_sha256") or ""),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -234,6 +240,8 @@ class DistributionManifest:
             out["source"] = self.source
         if self.installed_at:
             out["installed_at"] = self.installed_at
+        if self.bundle_sha256:
+            out["bundle_sha256"] = self.bundle_sha256
         return out
 
     def owned_paths(self) -> List[str]:
@@ -373,7 +381,7 @@ def _env_template_from_manifest(manifest: DistributionManifest) -> str:
 
 
 def _looks_like_git_url(s: str) -> bool:
-    s = s.strip()
+    s = s.strip().split("#", 1)[0]  # ignore a #<ref> pin for the shape check
     if s.endswith(".git"):
         return True
     if s.startswith(("git@", "ssh://", "git://")):
@@ -388,23 +396,91 @@ def _looks_like_git_url(s: str) -> bool:
     return False
 
 
-def _git_clone(url: str, dest: Path) -> None:
+_EXACT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _split_git_ref(url: str) -> Tuple[str, Optional[str]]:
+    """Split a ``url#ref`` into ``(url, ref)``. ``ref`` is None when absent."""
+    if "#" in url:
+        base, _, ref = url.partition("#")
+        ref = ref.strip()
+        return base, (ref or None)
+    return url, None
+
+
+def _git_clone(url: str, dest: Path) -> Optional[str]:
+    """Clone *url* into *dest*, honoring a ``#ref`` pin. Returns the resolved
+    commit SHA (or None).
+
+    Supply-chain gate (WP4): the clone/quarantine tracks executable profile
+    code. An exact ``#<40-char-sha>`` pin is a reviewed identity and is allowed;
+    any mutable/unpinned source (bare HEAD, or a branch/tag ref) fails closed
+    unless the operator explicitly allows unverified profile activation. The
+    resolved commit is returned so the caller can persist it in provenance.
+    """
+    base_url, ref = _split_git_ref(url)
+    pinned_sha = bool(ref and _EXACT_SHA_RE.match(ref.lower()))
+
+    if not pinned_sha:
+        try:
+            from hermes_cli.supply_chain.gate import compat_opt_in
+
+            _dist_ok = compat_opt_in("profile-distribution")
+        except Exception:
+            _dist_ok = False
+        if not _dist_ok:
+            raise DistributionError(
+                "Installing a profile distribution from a mutable/unpinned git "
+                "source is disabled by default (supply-chain enforce). Pin an "
+                "exact commit with url#<40-char-sha>, or allow it in config: "
+                "security.supply_chain.allow_unverified_components: "
+                "[\"profile-distribution\"]. See docs/security/supply-chain-migration.md."
+            )
+
     # Normalize github.com/user/repo shorthand
-    if re.match(r"^github\.com/[\w.-]+/[\w.-]+/?$", url):
-        url = f"https://{url.rstrip('/')}"
+    if re.match(r"^github\.com/[\w.-]+/[\w.-]+/?$", base_url):
+        base_url = f"https://{base_url.rstrip('/')}"
+
     try:
-        subprocess.run(
-            ["git", "clone", "--depth", "1", url, str(dest)],
-            check=True,
-            capture_output=True,
-            stdin=subprocess.DEVNULL,
-            env=noninteractive_git_env(),
-        )
+        if pinned_sha:
+            # Full clone so an arbitrary commit can be checked out, then detach.
+            subprocess.run(
+                ["git", "clone", base_url, str(dest)],
+                check=True, capture_output=True, stdin=subprocess.DEVNULL,
+                env=noninteractive_git_env(),
+            )
+            subprocess.run(
+                ["git", "-C", str(dest), "checkout", "--detach", ref],
+                check=True, capture_output=True, stdin=subprocess.DEVNULL,
+                env=noninteractive_git_env(),
+            )
+        elif ref:
+            subprocess.run(
+                ["git", "clone", "--depth", "1", "--branch", ref, base_url, str(dest)],
+                check=True, capture_output=True, stdin=subprocess.DEVNULL,
+                env=noninteractive_git_env(),
+            )
+        else:
+            subprocess.run(
+                ["git", "clone", "--depth", "1", base_url, str(dest)],
+                check=True, capture_output=True, stdin=subprocess.DEVNULL,
+                env=noninteractive_git_env(),
+            )
     except FileNotFoundError as exc:
         raise DistributionError("git is required for git-URL installs") from exc
     except subprocess.CalledProcessError as exc:
         stderr = exc.stderr.decode("utf-8", errors="replace") if exc.stderr else ""
         raise DistributionError(f"git clone failed: {stderr.strip()}") from exc
+
+    try:
+        resolved = subprocess.run(
+            ["git", "-C", str(dest), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True, stdin=subprocess.DEVNULL,
+            env=noninteractive_git_env(),
+        ).stdout.strip()
+        return resolved or None
+    except (subprocess.CalledProcessError, OSError):
+        return None
 
 
 def _stage_source(source: str, workdir: Path) -> Tuple[Path, str]:
@@ -424,7 +500,7 @@ def _stage_source(source: str, workdir: Path) -> Tuple[Path, str]:
     # Git URL
     if _looks_like_git_url(src_str):
         cloned = workdir / "clone"
-        _git_clone(src_str, cloned)
+        resolved_commit = _git_clone(src_str, cloned)
         # Remove .git to keep the staged tree clean
         shutil.rmtree(cloned / ".git", ignore_errors=True)
         if not (cloned / MANIFEST_FILENAME).is_file():
@@ -432,7 +508,12 @@ def _stage_source(source: str, workdir: Path) -> Tuple[Path, str]:
                 f"No {MANIFEST_FILENAME} at the root of {src_str!r}. "
                 "This repository is not a Hermes profile distribution."
             )
-        return cloned, src_str
+        # Persist the resolved commit as the declared channel so `hermes profile
+        # update` re-pulls the reviewed identity, never a silently-advanced HEAD.
+        provenance = src_str
+        if "#" not in src_str and resolved_commit:
+            provenance = f"{src_str}#{resolved_commit}"
+        return cloned, provenance
 
     # Local directory
     path_guess = Path(src_str).expanduser()
@@ -539,6 +620,10 @@ def plan_install(
         )
     manifest.name = canon
     manifest.source = provenance
+    # Supply-chain (WP4 item 4): record the deterministic whole-bundle digest of
+    # the staged tree alongside the resolved commit in ``source``.
+    from hermes_cli.plugins_cmd import plugin_bundle_digest
+    manifest.bundle_sha256 = plugin_bundle_digest(staged)
     # Stamped once here so plan_install() callers (both fresh install and
     # update) propagate a freshly-minted timestamp through _copy_dist_payload.
     manifest.installed_at = datetime.now(timezone.utc).isoformat(timespec="seconds")

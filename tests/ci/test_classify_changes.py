@@ -106,6 +106,17 @@ CASES = {
         ["website/scripts/generate-llms-txt.py"],
         _lanes(python=True, scan=True, site=True),
     ),
+    # The supply-chain manifest/ledger (WP4) are JSON, but check_supply_chain.py
+    # re-validates them, so a manifest-only edit must run the supply-chain scan
+    # job (scan) and the Python lane that runs its behavioral tests.
+    "supply-chain manifest → scan + python": (
+        ["supply-chain/manifest.json"],
+        _lanes(python=True, scan=True),
+    ),
+    "supply-chain ledger → scan + python": (
+        ["supply-chain/ledger.json"],
+        _lanes(python=True, scan=True),
+    ),
     # SKILL.md reads like docs, but the skill-doc tests read skills/, so a
     # skill edit must still run Python.
     "skill md → python + site": (["skills/github/SKILL.md"], _lanes(python=True, site=True)),

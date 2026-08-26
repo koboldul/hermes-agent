@@ -78,7 +78,7 @@ class FakeTerminal {
   write() {}
 }
 
-const maybeReloadForLoopbackWsAuthFailure = vi.fn(() => false);
+const maybeReturnToBootstrapGateOnWsAuthFailure = vi.fn(() => false);
 const apiMocks = vi.hoisted(() => ({
   buildWsUrl: vi.fn(async () => "ws://localhost/api/pty?channel=chat-1"),
 }));
@@ -119,11 +119,14 @@ vi.mock("@/i18n", () => ({
   }),
 }));
 vi.mock("@/lib/dashboard-auth-reload", () => ({
-  maybeReloadForLoopbackWsAuthFailure,
+  maybeReturnToBootstrapGateOnWsAuthFailure,
 }));
 vi.mock("@/lib/api", () => ({
   api: apiMocks,
   buildWsUrl: apiMocks.buildWsUrl,
+  hasBrowserSessionAuth: () =>
+    typeof window !== "undefined" &&
+    (!!window.__HERMES_AUTH_REQUIRED__ || !!window.__HERMES_LOCAL_BROWSER_AUTH__),
 }));
 
 class FakeWebSocket {
@@ -191,7 +194,7 @@ async function render(ui: ReactNode) {
 
 beforeEach(() => {
   FakeWebSocket.instances = [];
-  maybeReloadForLoopbackWsAuthFailure.mockClear();
+  maybeReturnToBootstrapGateOnWsAuthFailure.mockClear();
   apiMocks.buildWsUrl.mockReset();
   apiMocks.buildWsUrl.mockResolvedValue("ws://localhost/api/pty?channel=chat-1");
   vi.stubGlobal("WebSocket", FakeWebSocket);
@@ -272,7 +275,51 @@ describe("ChatPage", () => {
       wasClean: true,
     });
 
-    expect(maybeReloadForLoopbackWsAuthFailure).toHaveBeenCalledWith(4401);
+    expect(maybeReturnToBootstrapGateOnWsAuthFailure).toHaveBeenCalledWith(4401);
+  });
+
+  it("connects via a ticket in local-browser mode with no injected token", async () => {
+    // SEC-AUDIT-001 regression: in loopback local-browser mode the SPA has no
+    // ``__HERMES_SESSION_TOKEN__`` and ``__HERMES_AUTH_REQUIRED__`` is false.
+    // ChatPage must still treat this as browser-session auth: reach
+    // ``buildWsUrl`` (which mints a WS ticket from the session cookie) and open
+    // the socket — not show the "Session token unavailable" banner and bail.
+    Object.defineProperty(window, "__HERMES_SESSION_TOKEN__", {
+      configurable: true,
+      value: undefined,
+      writable: true,
+    });
+    Object.defineProperty(window, "__HERMES_AUTH_REQUIRED__", {
+      configurable: true,
+      value: false,
+      writable: true,
+    });
+    Object.defineProperty(window, "__HERMES_LOCAL_BROWSER_AUTH__", {
+      configurable: true,
+      value: true,
+      writable: true,
+    });
+    apiMocks.buildWsUrl.mockResolvedValue(
+      "ws://localhost/api/pty?ticket=tkt-local&channel=chat-1",
+    );
+
+    const { default: ChatPage } = await import("./ChatPage");
+
+    await render(
+      <MemoryRouter initialEntries={["/chat"]}>
+        <ChatPage isActive />
+      </MemoryRouter>,
+    );
+
+    // Reached the ticket-auth path (did not bail on the missing token).
+    await vi.waitFor(() =>
+      expect(apiMocks.buildWsUrl).toHaveBeenCalledWith("/api/pty", expect.anything()),
+    );
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1));
+    expect(FakeWebSocket.instances[0].url).toContain("ticket=");
+    expect(FakeWebSocket.instances[0].url).not.toContain("token=");
+    // No unavailable-token banner rendered.
+    expect(container?.textContent ?? "").not.toContain("Session token unavailable");
   });
 
   it("attaches visualViewport keyboard-inset listeners only while the chat tab is active", async () => {

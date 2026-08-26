@@ -48,6 +48,7 @@ from agent.lsp.client import (
 )
 from agent.lsp.servers import (
     ServerContext,
+    build_server_env_policy,
     find_server_for_file,
     language_id_for,
 )
@@ -209,7 +210,12 @@ class LSPService:
         enabled = bool(lsp_cfg.get("enabled", True))
         wait_mode = lsp_cfg.get("wait_mode", "document")
         wait_timeout = float(lsp_cfg.get("wait_timeout", DIAGNOSTICS_DOCUMENT_WAIT))
-        install_strategy = lsp_cfg.get("install_strategy", "auto")
+        # SEC-AUDIT-002: never reconstruct "auto" from a raw config value.
+        # Effective "auto" requires versioned affirmative consent; every other
+        # state collapses to "manual".
+        from agent.lsp.consent import effective_install_strategy
+
+        install_strategy = effective_install_strategy(lsp_cfg)
         try:
             idle_timeout = float(lsp_cfg.get("idle_timeout", DEFAULT_IDLE_TIMEOUT))
         except (TypeError, ValueError):
@@ -594,6 +600,7 @@ class LSPService:
                 workspace_root=spec.workspace_root,
                 command=spec.command,
                 env=spec.env,
+                env_policy=build_server_env_policy(spec.command),
                 cwd=spec.cwd,
                 initialization_options=spec.initialization_options,
                 seed_diagnostics_on_first_push=spec.seed_diagnostics_on_first_push or srv.seed_first_push,

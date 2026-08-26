@@ -7,8 +7,17 @@ import subprocess
 import tarfile
 import time
 from unittest.mock import MagicMock, patch
-
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _opt_in_unverified(monkeypatch):
+    # These tests exercise the tirith auto-install/scan mechanics, which are now
+    # the explicit transport-trusted compatibility path (the secure default
+    # disables auto-install). Opt in (config gate) so the mechanics run.
+    monkeypatch.setattr(
+        "hermes_cli.supply_chain.gate._sc_config", lambda: {"enforce": True, "allow_unverified_components": ["*"]}
+    )
 
 import tools.tirith_security as _tirith_mod
 from tools.tirith_security import check_command_security, ensure_installed
@@ -31,6 +40,26 @@ def _reset_resolved_path():
     _tirith_mod._install_failure_reason = ""
     _tirith_mod._crash_count = 0
     _tirith_mod._circuit_open = False
+
+
+@pytest.fixture(autouse=True)
+def _assume_supported_platform(request, monkeypatch):
+    """tirith ships no Windows build, so ``_detect_target()`` returns ``None``
+    (and ``is_platform_supported()`` returns ``False``) on this host — which
+    short-circuits the *host-independent* exit-code-mapping and resolution logic
+    these tests exercise before it can run. Supply a supported target triple as
+    data (the same convention as the ``@patch("_detect_target", ...)`` decorators
+    the cosign/archive tests already use) so the logic under test executes on any
+    host. Tests that patch ``_detect_target`` themselves override this cleanly.
+
+    ``test_is_platform_supported`` asserts the platform→support mapping itself,
+    so it must see the real detector and opts out by name.
+    """
+    if getattr(request, "function", None) is not None \
+            and request.function.__name__ == "test_is_platform_supported":
+        return
+    monkeypatch.setattr(_tirith_mod, "_detect_target",
+                        lambda: "x86_64-unknown-linux-gnu")
 
 
 # ---------------------------------------------------------------------------

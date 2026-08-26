@@ -26,6 +26,16 @@ import pytest
 from tools import lazy_deps as ld
 
 
+@pytest.fixture(autouse=True)
+def _opt_in_unverified(monkeypatch):
+    # Lazy install is the explicit transport-trusted compatibility path now;
+    # opt in (config gate) so the gating/durable-target mechanics run under the
+    # pre-existing expectations. (The supply-chain enforce gate is proved separately.)
+    monkeypatch.setattr(
+        "hermes_cli.supply_chain.gate._sc_config", lambda: {"enforce": True, "allow_unverified_components": ["*"]}
+    )
+
+
 # ---------------------------------------------------------------------------
 # Target resolution + gating
 # ---------------------------------------------------------------------------

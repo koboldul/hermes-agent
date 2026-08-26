@@ -10,6 +10,15 @@ description: "在 Linux、macOS、WSL2、原生 Windows 或通过 Termux 在 And
 
 ## 快速安装
 
+:::warning 前置条件：请先安装 `uv`
+Hermes 使用 [`uv`](https://docs.astral.sh/uv/)（Astral 的包管理器）构建其 Python 环境。出于供应链安全考虑，安装程序**使用由操作者安装的 `uv`，不会自动下载它**——若 `uv` 缺失，它会停止并给出确切命令，而不会静默拉取未经验证的二进制文件。请在运行下方任何命令前先安装它：
+
+- **Linux / macOS / WSL2：** `pipx install uv`——或 `brew install uv`——或参见 [uv 官方安装指南](https://docs.astral.sh/uv/getting-started/installation/)。
+- **Windows（原生，PowerShell）：** `winget install astral-sh.uv`
+
+用 `uv --version` 确认。Node.js 和 Git 同理——若安装程序报告缺失，请用你的包管理器安装。**Android/Termux 例外**——它使用 Python 标准库的 `venv` + `pip`，无需 `uv`。破例标志（`--allow-unverified-bootstrap` / `-AllowUnverifiedBootstrap`）会让安装程序从未经验证的上游拉取这些依赖，**不推荐**；参见[供应链迁移指南](https://github.com/NousResearch/hermes-agent/blob/main/docs/security/supply-chain-migration.md)。
+:::
+
 ### 一行安装命令（Linux / macOS / WSL2）
 
 基于 git 的安装方式，跟踪 `main` 分支，可立即获取最新变更：
@@ -77,7 +86,7 @@ curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
 
 ### 安装程序做了什么
 
-安装程序自动处理一切——所有依赖（Python、Node.js、ripgrep、ffmpeg）、仓库克隆、虚拟环境、全局 `hermes` 命令配置以及 LLM 提供商配置。完成后即可开始聊天。
+安装程序会处理其余部分——其余依赖（Python、ripgrep、ffmpeg）、仓库克隆、虚拟环境、全局 `hermes` 命令配置以及 LLM 提供商配置。它依赖由操作者安装的 `uv`（见上方前置条件）；与 Node.js 和 Git 一样，若缺失则会停止并给出可操作的提示，而不会拉取未经验证的二进制文件。完成后即可开始聊天。
 
 #### 安装目录结构
 
@@ -123,16 +132,15 @@ hermes setup --portal
 
 ## 前置条件
 
-**Git 安装程序：** 唯一的前置条件是 **Git**。安装程序自动处理其余一切：
+**Git 安装程序：** 你必须先自行安装 **`uv`**——出于供应链安全考虑，安装程序不会自动下载 `uv`，若缺失会停止并给出确切命令（`pipx install uv`、`brew install uv` 或 `winget install astral-sh.uv`；用 `uv --version` 确认）。**Android/Termux 例外**——它使用 Python 标准库的 `venv` + `pip`，无需 `uv`。除此之外，唯一的前置条件是 **Git**。安装 `uv` 后，安装程序处理其余部分：
 
-- **uv**（快速 Python 包管理器）
 - **Python 3.11**（通过 uv，无需 sudo）
 - **Node.js v22**（用于浏览器自动化和 WhatsApp 桥接）
 - **ripgrep**（快速文件搜索）
 - **ffmpeg**（TTS 的音频格式转换）
 
 :::info
-你**无需**手动安装 Python、Node.js、ripgrep 或 ffmpeg。安装程序会检测缺失的依赖并自动安装。只需确保 `git` 可用（`git --version`）。
+请先安装 **`uv`**（`pipx install uv` / `brew install uv` / `winget install astral-sh.uv`）。之后你**无需**手动安装 Python、ripgrep 或 ffmpeg——安装程序会检测缺失的依赖并自动安装。只需确保 `git` 可用（`git --version`）；若 Node.js 或 Git 缺失，安装程序会打印确切的安装命令，而不会拉取未经验证的二进制文件。
 :::
 
 :::tip Nix 用户

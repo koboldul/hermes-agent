@@ -420,6 +420,9 @@ export const ja = defineLocale({
       embedsAlways: '常に',
       embedsOff: 'オフ',
       embedsReset: (count: number) => `許可した${count}件のサービスをリセット`,
+      linkPreviewsTitle: 'リンクプレビュー',
+      linkPreviewsDesc:
+        'リンクのページタイトルとサイトアイコンを取得します。既定はオフ：オンにするまでHermesは通信せず、アプリは常に接続先を検証・固定します。',
       product: 'プロダクト',
       productDesc: '読みやすいツール活動と簡潔な要約を表示します。',
       technical: 'テクニカル',

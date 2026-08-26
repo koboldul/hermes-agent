@@ -123,19 +123,31 @@
         # ── Provision apt packages (first boot only, cached in writable layer) ──
         # sudo: agent self-modification
         # nodejs/npm: writable node so npm i -g works (nix store copies are read-only)
-        #   Node 22 via NodeSource — Ubuntu 24.04 ships Node 18 which is EOL.
-        # curl: needed for uv installer + NodeSource setup
+        # curl: needed for uv installer + (opt-in) NodeSource setup
         if [ ! -f /var/lib/hermes-tools-provisioned ] && command -v apt-get >/dev/null 2>&1; then
           echo "First boot: provisioning agent tools..."
           apt-get update -qq
           apt-get install -y -qq sudo curl ca-certificates gnupg
-          mkdir -p /etc/apt/keyrings
-          curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
-            | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
-          echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
-            > /etc/apt/sources.list.d/nodesource.list
-          apt-get update -qq
-          apt-get install -y -qq nodejs
+          # Supply-chain (WP4 A7): the NodeSource external apt repo + key is an
+          # UNVERIFIED open apt path. Secure by default — it is NOT added unless
+          # the operator explicitly opts into the external manager via the module
+          # option services.hermes-agent.allowUnverifiedBootstrap. Otherwise
+          # provision a Nix-pinned Node.
+          ${if cfg.allowUnverifiedBootstrap then ''
+            # Explicit operator opt-in: GPG-signed, major-version-pinned node_22.x.
+            mkdir -p /etc/apt/keyrings
+            curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+              | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
+            echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
+              > /etc/apt/sources.list.d/nodesource.list
+            apt-get update -qq
+            apt-get install -y -qq nodejs
+          '' else ''
+            echo "hermes: NodeSource Node auto-install is disabled by default (supply-chain enforce)." >&2
+            echo "        Provision a Nix-pinned Node (environment.systemPackages), or set" >&2
+            echo "        services.hermes-agent.allowUnverifiedBootstrap = true to use the pinned" >&2
+            echo "        NodeSource external repo. See docs/security/supply-chain-migration.md" >&2
+          ''}
           touch /var/lib/hermes-tools-provisioned
         fi
 
@@ -147,7 +159,14 @@
 
         # uv (Python manager) — not in Ubuntu repos, retry-safe outside the sentinel
         if ! command -v uv >/dev/null 2>&1 && [ ! -x "$TARGET_HOME/.local/bin/uv" ] && command -v curl >/dev/null 2>&1; then
-          su -s /bin/sh "$TARGET_USER" -c 'curl -LsSf https://astral.sh/uv/install.sh | sh' || true
+          # Supply-chain gate (WP4): the astral installer is fetched and executed
+          # unverified. Secure by default — controlled by the module option
+          # services.hermes-agent.allowUnverifiedBootstrap, not an env var.
+          ${if cfg.allowUnverifiedBootstrap then ''
+            su -s /bin/sh "$TARGET_USER" -c 'curl -LsSf https://astral.sh/uv/install.sh | sh' || true
+          '' else ''
+            echo "hermes: uv auto-install disabled by default (supply-chain enforce); provision uv via a Nix-pinned package, or set services.hermes-agent.allowUnverifiedBootstrap = true. See docs/security/supply-chain-migration.md" >&2
+          ''}
         fi
 
         # Python 3.12 venv — gives the agent a writable Python with pip.
@@ -285,6 +304,19 @@
                 Add the hermes CLI to environment.systemPackages and export
                 HERMES_HOME system-wide (via environment.variables) so interactive
                 shells share state with the gateway service.
+              '';
+            };
+
+            allowUnverifiedBootstrap = mkOption {
+              type = types.bool;
+              default = false;
+              description = ''
+                Supply-chain (WP4): secure by default. When false (the default),
+                first-boot provisioning does NOT run the unverified upstream uv
+                installer — provision uv/Node via Nix-pinned packages instead.
+                Set true to explicitly opt into the mutable astral.sh uv installer
+                at first boot (transport-trusted, not release-verified). See
+                docs/security/supply-chain-migration.md.
               '';
             };
 

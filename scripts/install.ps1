@@ -16,6 +16,10 @@ param(
     [switch]$NoVenv,
     [switch]$SkipSetup,
     [switch]$SkipComputerUse,
+    # Supply-chain (WP4): opt into the UNVERIFIED installers (uv/Node/npm/cua)
+    # for this run. Secure by default; without it, a missing tool must come from
+    # your OS/version manager. Sets an internal bridge, not a user env var.
+    [switch]$AllowUnverifiedBootstrap,
     [string]$Branch = "main",
     # -Commit and -Tag are higher-precedence variants of -Branch for users
     # who need reproducible installs (desktop installer pinning, CI, release
@@ -76,6 +80,38 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+# Supply-chain (WP4): bridge the -AllowUnverifiedBootstrap switch to an internal
+# marker consumed by the install gates. Set AFTER parameter parsing; not a
+# user-facing environment variable.
+if ($AllowUnverifiedBootstrap) {
+    $env:_HERMES_SC_BOOTSTRAP_OVERRIDE = "1"
+    Write-Host "WARNING: -AllowUnverifiedBootstrap: running UNVERIFIED transport-trusted installers (not release-verified)." -ForegroundColor Yellow
+}
+
+# Supply-chain (WP4 A7): gate the UNVERIFIED pip fallback cascade. Hermes'
+# hash-verified install path is `uv sync --extra all --locked` (uv.lock records
+# a SHA256 for every transitive). When that is missing or fails, the
+# `uv pip install -e` tiers re-resolve dependencies fresh from PyPI with NO hash
+# verification. That cascade -- plus the targeted [web] repair and the desktop
+# voice/wake pre-install -- runs only under an explicit -AllowUnverifiedBootstrap
+# opt-in (the internal _HERMES_SC_BOOTSTRAP_OVERRIDE bridge set above). Secure
+# default: fail closed so the caller aborts and the venv transaction rolls back
+# to the previous working install.
+function Test-UnverifiedPipFallbackAllowed {
+    return ($env:_HERMES_SC_BOOTSTRAP_OVERRIDE -eq "1")
+}
+
+function Assert-UnverifiedPipFallbackAllowed {
+    param([string]$Context = "dependency")
+    if (Test-UnverifiedPipFallbackAllowed) { return }
+    throw ("Unverified pip fallback ($Context) is disabled by default " +
+        "(supply-chain enforce): hash-verified 'uv sync --extra all --locked' " +
+        "was unavailable or failed, and re-resolving dependencies from PyPI is " +
+        "not hash-verified. Re-run install.ps1 -AllowUnverifiedBootstrap to opt " +
+        "in (UNVERIFIED), or repair uv.lock so the hash-verified install " +
+        "succeeds. See docs/security/supply-chain-migration.md")
+}
 
 # Suppress Invoke-WebRequest's per-chunk progress bar.  Windows PowerShell
 # 5.1's progress UI repaints synchronously on every received byte, which
@@ -488,6 +524,163 @@ function Write-Err {
     Write-Host "[X] $Message" -ForegroundColor Red
 }
 
+# -- Managed-artifact provenance markers (WP4 A6 -- pre-config fast path) -------
+# A Hermes-managed uv/node binary is EXECUTED (even for a --version probe) only
+# when it carries a current provenance marker (<Binary>.provenance.json) whose
+# recorded sha256 matches the file bytes. Runs during bootstrap before the
+# Python layer/config exists. The marker shape matches
+# hermes_cli/supply_chain/managed.write_marker so the Python resolver honors it.
+function Test-ManagedMarker {
+    param([string]$Binary)
+    if (-not $Binary) { return $false }
+    if (-not (Test-Path -LiteralPath $Binary -PathType Leaf)) { return $false }
+    $marker = "$Binary.provenance.json"
+    if (-not (Test-Path -LiteralPath $marker -PathType Leaf)) { return $false }
+    try {
+        $data = Get-Content -LiteralPath $marker -Raw -ErrorAction Stop | ConvertFrom-Json
+    } catch { return $false }
+    $recorded = $null
+    try { $recorded = [string]$data.digest.value } catch { $recorded = $null }
+    if (-not $recorded) { return $false }
+    try {
+        $actual = (Get-FileHash -LiteralPath $Binary -Algorithm SHA256 -ErrorAction Stop).Hash
+    } catch { return $false }
+    return ($actual.ToLower() -eq $recorded.ToLower())
+}
+
+function Write-ManagedMarker {
+    param(
+        [string]$Binary,
+        [string]$Component = "component",
+        [string]$Version = "unknown",
+        [string]$Provenance = "operator_compat_opt_in"
+    )
+    if (-not $Binary) { return }
+    if (-not (Test-Path -LiteralPath $Binary -PathType Leaf)) { return }
+    try {
+        $digest = (Get-FileHash -LiteralPath $Binary -Algorithm SHA256 -ErrorAction Stop).Hash.ToLower()
+    } catch { return }
+    $now = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+    $payload = [ordered]@{
+        component  = $Component
+        digest     = [ordered]@{ algorithm = "sha256"; value = $digest }
+        marked_at  = $now
+        provenance = $Provenance
+        schema     = 1
+        version    = $Version
+    }
+    $marker = "$Binary.provenance.json"
+    $tmp = "$marker.tmp"
+    try {
+        # UTF-8 without BOM so Python's json.loads can read it (a BOM breaks it).
+        [System.IO.File]::WriteAllText($tmp, ($payload | ConvertTo-Json -Depth 5), (New-Object System.Text.UTF8Encoding($false)))
+        Move-Item -LiteralPath $tmp -Destination $marker -Force -ErrorAction Stop
+    } catch {
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# -- Managed-alias defence (WP4 A1/A6) -----------------------------------------
+# An operator/PATH binary that canonicalizes (realpath, case-insensitive) INTO a
+# Hermes-managed root -- this profile's, the default root's, or any
+# ~/.hermes/profiles/*/{bin,node,uv-tools} -- is the managed binary reached via a
+# PATH/symlink/junction/case alias and must present a provenance marker before it
+# is executed.
+function Get-HermesManagedRoots {
+    $roots = New-Object System.Collections.Generic.List[string]
+    $legacyRoot = Join-Path $env:USERPROFILE ".hermes"
+    $nativeRoot = if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA "hermes" } else { $null }
+    # A1 (final): mirror Python hermes_managed_roots _MANAGED_SUBDIRS + node, and
+    # enumerate the NATIVE default root AND every real profile under it,
+    # independent of the active HermesHome, so a managed alias for ANY profile is
+    # caught (bin / node / node\bin / uv-tools / cache / browsers).
+    $subs = @("bin", "node", "node\bin", "uv-tools", "cache", "browsers")
+    $bases = @($HermesHome, $legacyRoot, $nativeRoot) | Where-Object { $_ } | Select-Object -Unique
+    foreach ($b in $bases) {
+        if (-not $b) { continue }
+        foreach ($sub in $subs) {
+            $roots.Add((Join-Path $b $sub))
+        }
+        $profiles = Join-Path $b "profiles"
+        if (Test-Path -LiteralPath $profiles) {
+            foreach ($p in (Get-ChildItem -LiteralPath $profiles -Directory -ErrorAction SilentlyContinue)) {
+                foreach ($sub in $subs) {
+                    $roots.Add((Join-Path $p.FullName $sub))
+                }
+            }
+        }
+    }
+    return $roots
+}
+
+function Get-CanonicalPath {
+    param([string]$Path)
+    if (-not $Path) { return $null }
+    $p = $Path
+    try {
+        $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+        if ($item -and $item.PSObject.Methods.Name -contains "ResolveLinkTarget") {
+            $resolved = $item.ResolveLinkTarget($true)
+            if ($resolved) { $p = $resolved.FullName } else { $p = $item.FullName }
+        } elseif ($item -and $item.Target) {
+            $t = $item.Target
+            if ($t -is [array]) { $t = $t[0] }
+            if (-not [System.IO.Path]::IsPathRooted($t)) {
+                $t = Join-Path (Split-Path -Parent $item.FullName) $t
+            }
+            $p = $t
+        } elseif ($item) {
+            $p = $item.FullName
+        }
+    } catch { }
+    try { $p = [System.IO.Path]::GetFullPath($p) } catch { }
+    return $p.ToLowerInvariant()
+}
+
+function Test-UnderManagedRoot {
+    param([string]$Path)
+    $real = Get-CanonicalPath $Path
+    if (-not $real) { return $false }
+    foreach ($root in (Get-HermesManagedRoots)) {
+        $rroot = Get-CanonicalPath $root
+        if (-not $rroot) { continue }
+        if ($real -eq $rroot -or $real.StartsWith($rroot + "\")) { return $true }
+    }
+    return $false
+}
+
+function Get-AcceptedOperatorPath {
+    # Return $Path when it is safe to execute as an operator binary (not under a
+    # managed root, OR under one AND its marker verifies); else $null (reject).
+    param([string]$Path)
+    if (-not $Path) { return $null }
+    if (Test-UnderManagedRoot $Path) {
+        if (Test-ManagedMarker (Get-CanonicalPath $Path)) { return $Path }
+        return $null
+    }
+    return $Path
+}
+
+function Test-UvCmdTrusted {
+    # A1: $script:UvCmd is safe to EXECUTE only when it is either a non-managed
+    # operator/PATH uv, or a managed uv whose provenance marker currently
+    # verifies. A managed-rooted path (directly or via a PATH/symlink/case
+    # alias) without a valid marker is rejected. Re-checked on every
+    # Resolve-UvCmd call so a cached $script:UvCmd cannot outlive a tamper,
+    # marker removal, or a PATH change that starts aliasing a managed root.
+    param([string]$Cmd)
+    if (-not $Cmd) { return $false }
+    if ($Cmd -eq "uv") {
+        $src = (Get-Command uv -CommandType Application -ErrorAction SilentlyContinue |
+            Select-Object -First 1).Source
+        if (-not $src) { return $false }
+        return [bool](Get-AcceptedOperatorPath $src)
+    }
+    if (-not (Test-Path $Cmd)) { return $false }
+    if (Test-UnderManagedRoot $Cmd) { return (Test-ManagedMarker (Get-CanonicalPath $Cmd)) }
+    return $true
+}
+
 function Invoke-NativeWithRelaxedErrorAction {
     param([scriptblock]$Script)
 
@@ -749,14 +942,46 @@ function Install-Uv {
     # place, so install.ps1 and `hermes update` stay in sync.
     $managedUv = Join-Path $HermesHome "bin\uv.exe"
 
-    if (Test-Path $managedUv) {
+    if ((Test-Path $managedUv) -and (Test-ManagedMarker $managedUv)) {
         $script:UvCmd = $managedUv
         $version = & $managedUv --version
         Write-Success "Managed uv found ($version)"
         return $true
     }
+    if (Test-Path $managedUv) {
+        # Exists but no current provenance marker (legacy/tampered): do NOT run
+        # it (not even --version). Fall through to an operator uv or a gated
+        # re-provision that writes a fresh marker.
+        Write-Warn "Ignoring managed uv at $managedUv (no valid provenance marker; A6)."
+    }
 
-    Write-Info "Installing managed uv into $HermesHome\bin ..."
+    # Supply-chain gate (WP4): prefer an existing operator-managed uv; otherwise
+    # the astral installer (irm | iex, unverified) runs only under an explicit
+    # operator opt-in.
+    $operatorUv = (Get-Command uv -CommandType Application -ErrorAction SilentlyContinue |
+        Where-Object { $_.Source -ne $managedUv } | Select-Object -First 1)
+    if ($operatorUv -and $operatorUv.Source) {
+        # A1/A6: a PATH uv that resolves INTO a managed root (this or another
+        # profile's) is the managed binary via alias -- accept it only with a
+        # valid marker, verified BEFORE --version executes it.
+        $acceptedUv = Get-AcceptedOperatorPath $operatorUv.Source
+        if ($acceptedUv) {
+            $script:UvCmd = $acceptedUv
+            $version = & $acceptedUv --version
+            Write-Success "Using operator-managed uv ($version at $acceptedUv)"
+            return $true
+        }
+        Write-Warn "Ignoring PATH uv $($operatorUv.Source): it resolves into a Hermes-managed root without a valid provenance marker (A6)."
+    }
+    $optIn = ($env:_HERMES_SC_BOOTSTRAP_OVERRIDE -eq "1")
+    if (-not $optIn) {
+        Write-Err "Automatic uv install is disabled by default (supply-chain enforce)."
+        Write-Info "Install uv with 'winget install astral-sh.uv' (Hermes will use it in place), or re-run install.ps1 -AllowUnverifiedBootstrap."
+        Write-Info "Manual: https://docs.astral.sh/uv/getting-started/installation/ (see docs/security/supply-chain-migration.md)"
+        return $false
+    }
+
+    Write-Info "Installing managed uv into $HermesHome\bin (UNVERIFIED compatibility bootstrap; opted in) ..."
     New-Item -ItemType Directory -Path (Join-Path $HermesHome "bin") -Force | Out-Null
 
     # UV_INSTALL_DIR tells the astral installer to place the binary
@@ -833,6 +1058,9 @@ function Install-Uv {
         if (Test-Path $managedUv) {
             $script:UvCmd = $managedUv
             $version = & $managedUv --version
+            # A6: bind this binary's digest so later fast paths trust it while
+            # still catching a subsequent tamper/swap (explicit opted-in bootstrap).
+            Write-ManagedMarker -Binary $managedUv -Component "uv" -Version ([string]$version) -Provenance "operator_compat_opt_in_shell"
             Write-Success "Managed uv installed ($version)"
             return $true
         }
@@ -960,6 +1188,15 @@ function Update-ManagedNpm {
     $npmCmd = Join-Path $NodeDir "npm.cmd"
     if (-not (Test-Path $npmCmd)) { return $false }
 
+    # Supply-chain gate (WP4): a semver-range npm upgrade pulls an unpinned
+    # version from the registry. Disabled by default; the bundled npm is
+    # preserved. Explicit opt-in required.
+    $npmOptIn = ($env:_HERMES_SC_BOOTSTRAP_OVERRIDE -eq "1")
+    if (-not $npmOptIn) {
+        Write-Info "Managed npm upgrade disabled by default (supply-chain enforce); keeping the bundled npm. Re-run install.ps1 -AllowUnverifiedBootstrap to opt in."
+        return $false
+    }
+
     $range = Get-NpmRange
 
     # Skip the network round-trip when the bundled npm already satisfies the
@@ -1000,7 +1237,7 @@ function Update-ManagedNpm {
         # Same pattern as Install-Uv.
         $ErrorActionPreference = "Continue"
         & $npmCmd install --global --prefix $NodeDir "npm@$range" `
-            --no-fund --no-audit --progress=false 2>&1 | Out-Null
+            --ignore-scripts --no-fund --no-audit --progress=false 2>&1 | Out-Null
         $exit = $LASTEXITCODE
     } catch {
         $exit = 1
@@ -1014,7 +1251,7 @@ function Update-ManagedNpm {
 
     if ($exit -ne 0) {
         Write-Warn "Could not upgrade bundled npm to $range -- ``npm ci`` may fail with EBADENGINE."
-        Write-Info  "Fix manually: npm install -g --prefix `"$NodeDir`" npm@`"$range`""
+        Write-Info  "Fix manually: run 'node scripts/ci/install-npm-pinned.mjs' (digest-pinned npm bootstrap; verifies the exact tarball before install)."
         return $false
     }
 
@@ -1055,28 +1292,40 @@ function Test-ManagedNodeInUse {
 # clean error via the stage-driver's try/catch.
 function Resolve-UvCmd {
     # Already resolved (default invocation path: Install-Uv ran earlier
-    # in the same process and set $script:UvCmd).
+    # in the same process and set $script:UvCmd). A1: revalidate on EVERY
+    # call -- a managed uv must still carry a current provenance marker, and a
+    # cached value that no longer verifies (tamper, marker removed, PATH now
+    # aliasing a managed root) is dropped and re-discovered before any execute.
     if ($script:UvCmd) {
-        if ($script:UvCmd -eq "uv") {
-            # "uv" on PATH -- verify it's still resolvable (PATH could have
-            # changed mid-session; cheap to recheck).
-            if (Get-Command uv -ErrorAction SilentlyContinue) { return }
-        } elseif (Test-Path $script:UvCmd) {
-            return
+        if (Test-UvCmdTrusted $script:UvCmd) {
+            if ($script:UvCmd -eq "uv") {
+                # "uv" on PATH -- verify it's still resolvable (PATH could have
+                # changed mid-session; cheap to recheck).
+                if (Get-Command uv -ErrorAction SilentlyContinue) { return }
+            } else {
+                return
+            }
         }
-        # Stale; fall through to re-discover.
+        # Stale / untrusted; drop and re-discover.
+        $script:UvCmd = $null
     }
 
-    # Check the managed location first -- this is where Install-Uv puts it.
+    # Check the managed location first -- this is where Install-Uv puts it. A1:
+    # accept it ONLY when its provenance marker verifies; an unmarked/tampered
+    # managed uv is ignored (never executed, not even --version) so we fall
+    # through to an operator uv or a gated re-provision that re-writes a marker.
     $managedUv = Join-Path $HermesHome "bin\uv.exe"
-    if (Test-Path $managedUv) {
+    if ((Test-Path $managedUv) -and (Test-ManagedMarker $managedUv)) {
         $script:UvCmd = $managedUv
         return
     }
 
     # Fall back to PATH (covers edge cases where the installer ran in a
-    # sibling process and HERMES_HOME wasn't propagated).
-    if (Get-Command uv -ErrorAction SilentlyContinue) {
+    # sibling process and HERMES_HOME wasn't propagated). A1: reject a PATH uv
+    # that aliases a managed root without a valid marker.
+    $pathUv = (Get-Command uv -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1).Source
+    if ($pathUv -and (Get-AcceptedOperatorPath $pathUv)) {
         $script:UvCmd = "uv"
         return
     }
@@ -1084,7 +1333,9 @@ function Resolve-UvCmd {
     # Refresh PATH from registry in case the current process started before
     # Install-Uv updated User PATH.
     $env:Path = [Environment]::GetEnvironmentVariable("Path", "User") + ";" + [Environment]::GetEnvironmentVariable("Path", "Machine")
-    if (Get-Command uv -ErrorAction SilentlyContinue) {
+    $pathUv = (Get-Command uv -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1).Source
+    if ($pathUv -and (Get-AcceptedOperatorPath $pathUv)) {
         $script:UvCmd = "uv"
         return
     }
@@ -1384,6 +1635,15 @@ function Install-Git {
     # Download PortableGit into $HermesHome\git.  Always works as long as
     # we can reach github.com -- no admin, no winget, no reliance on the
     # user's possibly-broken system Git install.
+    # Supply-chain gate (WP4): PortableGit is downloaded from git-for-windows
+    # releases without a committed digest. Disabled by default; a system Git is
+    # preferred. Requires -AllowUnverifiedBootstrap.
+    if ($env:_HERMES_SC_BOOTSTRAP_OVERRIDE -ne "1") {
+        Write-Warn "PortableGit auto-download is disabled by default (supply-chain enforce)."
+        Write-Info "Install Git for Windows yourself (https://git-scm.com/download/win), or re-run install.ps1 -AllowUnverifiedBootstrap. See docs/security/supply-chain-migration.md"
+        $script:GitInstallFailureReason = "PortableGit auto-download disabled (supply-chain enforce; use -AllowUnverifiedBootstrap or install Git yourself)"
+        return $false
+    }
     Write-Info "Git not found -- downloading PortableGit to $HermesHome\git\ ..."
     Write-Info "(no admin rights required; isolated from any system Git install)"
 
@@ -1587,12 +1847,85 @@ function Test-NodeVersionOk {
     return ($v.Major -gt 22)
 }
 
+# A1 (final): WHOLE-TREE Node marker via the bundled Python verifier.
+# Test-ManagedMarker hashes a single binary; the WHOLE node tree (node + npm/npx
+# + npm CLI JS) is verified/created by scripts/ci/node_tree_marker.py using the
+# Python staged before Node. Fail closed when no Python / verifier is available.
+function Get-HermesPython {
+    foreach ($cand in @($env:HERMES_PYTHON, 'python3', 'python')) {
+        if (-not $cand) { continue }
+        $c = Get-Command $cand -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($c) { return $c.Source }
+    }
+    return $null
+}
+
+function Get-NodeMarkerScript {
+    if (-not $PSScriptRoot) { return $null }
+    $s = Join-Path $PSScriptRoot 'ci\node_tree_marker.py'
+    if (Test-Path -LiteralPath $s) { return $s }
+    return $null
+}
+
+function Get-NodeHomeFromPath {
+    param([string]$NodePath)
+    $real = Get-CanonicalPath $NodePath
+    if (-not $real) { return $null }
+    $dir = Split-Path -Parent $real
+    $nodeRoot = if ((Split-Path -Leaf $dir) -eq "bin") { Split-Path -Parent $dir } else { $dir }
+    return (Split-Path -Parent $nodeRoot)
+}
+
+function Test-NodeTreeWhole {
+    param([string]$NodePath = "$HermesHome\node\node.exe")
+    $py = Get-HermesPython
+    $verifier = Get-NodeMarkerScript
+    $home = Get-NodeHomeFromPath $NodePath
+    if ((-not $py) -or (-not $verifier) -or (-not $home)) { return $false }
+    & $py $verifier --home $home --verify 2>$null | Out-Null
+    return ($LASTEXITCODE -eq 0)
+}
+
+function Write-NodeTreeWhole {
+    param([string]$Version = 'unknown')
+    $py = Get-HermesPython
+    $verifier = Get-NodeMarkerScript
+    if ((-not $py) -or (-not $verifier)) { return $false }
+    & $py $verifier --home $HermesHome --write --version $Version --provenance operator_compat_opt_in_shell 2>$null | Out-Null
+    return ($LASTEXITCODE -eq 0)
+}
+
+function Get-AcceptedNodeToolPath {
+    param([string]$Path, [string]$NodePath)
+    if (-not $Path) { return $null }
+    if (Test-UnderManagedRoot $Path) {
+        $anchor = if ($NodePath) { $NodePath } else { $Path }
+        $anchorReal = Get-CanonicalPath $anchor
+        if (-not (Test-ManagedMarker $anchorReal)) { return $null }
+        if (-not (Test-NodeTreeWhole -NodePath $anchor)) { return $null }
+    }
+    return $Path
+}
+
 function Test-Node {
     Write-Info "Checking Node.js (for browser tools)..."
 
-    if (Get-Command node -ErrorAction SilentlyContinue) {
-        $version = node --version
-        if (Test-NodeVersionOk $version) {
+    $pathNode = (Get-Command node -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1).Source
+    $pathNpm = (Get-Command npm -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1).Source
+    # A1: a PATH node that canonicalizes INTO a managed root (directly or via a
+    # PATH/symlink/case alias) must present a current provenance marker before
+    # we execute it -- even for this --version probe. A genuine operator/system
+    # node is not under a managed root, so Get-AcceptedOperatorPath returns it
+    # unchanged and it works normally; an unmarked managed alias is rejected and
+    # we fall through to the marker-verified managed branch / gated reinstall.
+    $acceptedNode = Get-AcceptedNodeToolPath -Path $pathNode -NodePath $pathNode
+    $acceptedNpm = Get-AcceptedNodeToolPath -Path $pathNpm -NodePath $pathNode
+    if ($acceptedNode -and $acceptedNpm) {
+        $version = & $acceptedNode --version
+        $npmVersion = & $acceptedNpm --version
+        if ((Test-NodeVersionOk $version) -and $LASTEXITCODE -eq 0 -and $npmVersion) {
             Ensure-NodeExeOnPath | Out-Null
             Write-Success "Node.js $version found"
             $script:HasNode = $true
@@ -1602,8 +1935,11 @@ function Test-Node {
     }
 
     # Prefer a Hermes-managed Node from a previous run over a too-old system one.
+    # A6/A1: verify the WHOLE-TREE provenance marker BEFORE executing it (the
+    # & $managedNode --version below runs the binary), so a tampered/legacy/partial
+    # tree (node, npm/npx, or an npm CLI JS file) is never run.
     $managedNode = "$HermesHome\node\node.exe"
-    if ((Test-Path $managedNode) -and (Test-NodeVersionOk (& $managedNode --version))) {
+    if ((Test-Path $managedNode) -and (Test-ManagedMarker $managedNode) -and (Test-NodeTreeWhole -NodePath $managedNode) -and (Test-NodeVersionOk (& $managedNode --version))) {
         $version = & $managedNode --version
         $env:Path = "$HermesHome\node;$env:Path"
         Set-ManagedNodeFirstOnUserPath "$HermesHome\node"
@@ -1612,11 +1948,31 @@ function Test-Node {
         # npm, which is below the current engines.npm floor. No-ops when the
         # npm is already in range, so reruns cost one --version probe.
         Update-ManagedNpm "$HermesHome\node" | Out-Null
+        if (Test-Path "$HermesHome\node\npm.cmd") {
+            Write-ManagedMarker -Binary "$HermesHome\node\npm.cmd" -Component "node" -Version ([string]$version) -Provenance "operator_compat_opt_in_shell"
+        }
+        if (-not (Write-NodeTreeWhole -Version ([string]$version)) -or
+            -not (Test-NodeTreeWhole -NodePath $managedNode)) {
+            Write-Err "Managed npm tree could not be re-verified; refusing to continue."
+            $script:HasNode = $false
+            return $false
+        }
         $script:HasNode = $true
         return $true
     }
 
     Write-Info "Installing Hermes-managed Node.js $NodeVersion LTS..."
+
+    # Supply-chain gate (WP4): the portable Node download from nodejs.org is
+    # fetched unverified. Disabled by default; requires an explicit operator
+    # opt-in (a suitable operator-managed Node is preferred earlier).
+    $nodeOptIn = ($env:_HERMES_SC_BOOTSTRAP_OVERRIDE -eq "1")
+    if (-not $nodeOptIn) {
+        Write-Warn "Hermes-managed Node.js download is disabled by default (supply-chain enforce)."
+        Write-Info "Install a supported Node.js with your OS/version manager (winget/nvm-windows), or re-run install.ps1 -AllowUnverifiedBootstrap."
+        Write-Info "Manual: https://nodejs.org/en/download/ (see docs/security/supply-chain-migration.md)"
+        return
+    }
 
     # Try the portable-zip path FIRST -- no UAC, no admin, no winget MSI.
     # winget install OpenJS.NodeJS.LTS triggers a system-wide MSI install
@@ -1727,10 +2083,34 @@ function Test-Node {
                 # move-to-front and not an add-if-missing.
                 Set-ManagedNodeFirstOnUserPath "$HermesHome\node"
 
+                $version = "managed"
+                # A6/A1: mark the freshly-installed managed tree. The WHOLE-TREE
+                # marker on node (node + npm/npx + npm CLI JS) is authoritative
+                # for the Test-Node fast path + the Python resolver; write it LAST
+                # so it wins over the per-binary node marker. Per-binary npm +
+                # a per-binary node fallback (only when no Python/verifier).
+                if (Test-Path "$HermesHome\node\npm.cmd") {
+                    Write-ManagedMarker -Binary "$HermesHome\node\npm.cmd" -Component "node" -Version ([string]$version) -Provenance "operator_compat_opt_in_shell"
+                }
+                if (-not (Write-NodeTreeWhole -Version ([string]$version)) -or
+                    -not (Test-NodeTreeWhole -NodePath "$HermesHome\node\node.exe")) {
+                    Write-Err "Managed Node whole-tree provenance marker could not be created; refusing to execute it."
+                    $script:HasNode = $false
+                    return $false
+                }
                 $version = & "$HermesHome\node\node.exe" --version
                 Write-Success "Node.js $version installed to $HermesHome\node\ (portable, user-scoped)"
                 # The zip's bundled npm is below the repo's engines.npm floor.
                 Update-ManagedNpm "$HermesHome\node" | Out-Null
+                if (Test-Path "$HermesHome\node\npm.cmd") {
+                    Write-ManagedMarker -Binary "$HermesHome\node\npm.cmd" -Component "node" -Version ([string]$version) -Provenance "operator_compat_opt_in_shell"
+                }
+                if (-not (Write-NodeTreeWhole -Version ([string]$version)) -or
+                    -not (Test-NodeTreeWhole -NodePath "$HermesHome\node\node.exe")) {
+                    Write-Err "Managed npm changed without a valid whole-tree marker; refusing to continue."
+                    $script:HasNode = $false
+                    return $false
+                }
                 $script:HasNode = $true
 
                 Remove-Item -Force $tmpZip -ErrorAction SilentlyContinue
@@ -2836,6 +3216,12 @@ except Exception:
     )
     $installed = $skipPipFallback
     if (-not $skipPipFallback) {
+        # Supply-chain (WP4 A7): fail closed before the unverified PyPI re-resolve
+        # cascade. The throw propagates to the catch below, which restores the
+        # parked previous venv via the catch-block rollback -- a failed
+        # hash-verified sync leaves the prior working install intact rather than
+        # replacing it with an unverified one.
+        Assert-UnverifiedPipFallbackAllowed -Context "main package (PyPI re-resolve)"
         foreach ($tier in $installTiers) {
         Write-Info "Trying tier: $($tier.Name) ..."
         Invoke-NativeWithRelaxedErrorAction { & $UvCmd pip install -e $tier.Spec }
@@ -2923,9 +3309,13 @@ print(','.join(scripts))
                 }
                 if ($missing.Count -gt 0) {
                     Write-Warn "Console entry point(s) missing: $($missing -join ', ')"
-                    Write-Info "Reinstalling entry points..."
+                    Write-Info "Reinstalling entry points (--no-deps; regenerates the console shims from the already-installed project, no dependency re-resolve)..."
                     $env:UV_PROJECT_ENVIRONMENT = "$InstallDir\venv"
-                    Invoke-NativeWithRelaxedErrorAction { & $UvCmd pip install --reinstall -e . }
+                    # A7: --no-deps regenerates the console_scripts .exe shims
+                    # from the local editable project WITHOUT re-resolving any
+                    # dependency from PyPI, so this repair is not an unlocked
+                    # fetch sink (the deps are already installed hash-verified).
+                    Invoke-NativeWithRelaxedErrorAction { & $UvCmd pip install --reinstall --no-deps -e . }
                     $stillMissing = @()
                     foreach ($name in $expected) {
                         $exe = Join-Path $scriptsDir "$name.exe"
@@ -2967,13 +3357,21 @@ print(','.join(scripts))
         } catch { }
         $ErrorActionPreference = $prevEAP
         if (-not $webOk) {
-            Write-Warn "fastapi/uvicorn not importable -- `hermes dashboard` will not work."
-            Write-Info "Attempting targeted install of [web] extra as last resort..."
-            & $UvCmd pip install -e ".[web]"
-            if ($LASTEXITCODE -eq 0) {
-                Write-Success "[web] extra installed; `hermes dashboard` should now work."
+            if (Test-UnverifiedPipFallbackAllowed) {
+                Write-Warn "fastapi/uvicorn not importable -- `hermes dashboard` will not work."
+                Write-Info "Attempting targeted install of [web] extra as last resort..."
+                & $UvCmd pip install -e ".[web]"
+                if ($LASTEXITCODE -eq 0) {
+                    Write-Success "[web] extra installed; `hermes dashboard` should now work."
+                } else {
+                    Write-Warn "Could not install [web] extra. Run manually: uv pip install --python `"$pythonExe`" `"fastapi>=0.104,<1`" `"uvicorn[standard]>=0.24,<1`""
+                }
             } else {
-                Write-Warn "Could not install [web] extra. Run manually: uv pip install --python `"$pythonExe`" `"fastapi>=0.104,<1`" `"uvicorn[standard]>=0.24,<1`""
+                # Supply-chain (WP4 A7): the [web] repair re-resolves fastapi/
+                # uvicorn from PyPI without hash verification. Disabled by
+                # default; the hash-verified lockfile is the supported path.
+                Write-Warn "fastapi/uvicorn not importable and the unverified [web] repair is disabled by default (supply-chain enforce)."
+                Write-Info "Install from the hash-verified lockfile (uv sync --extra all --locked), or re-run install.ps1 -AllowUnverifiedBootstrap. See docs/security/supply-chain-migration.md"
             }
         }
         if (-not $webServerSyntaxOk) {
@@ -3283,16 +3681,12 @@ You are Hermes Agent, an intelligent AI assistant created by Nous Research. You 
 }
 
 function Install-NodeDeps {
-    if (-not $HasNode) {
-        # Cross-process driver mode (Hermes-Setup.exe runs each -Stage NAME
-        # in a fresh powershell.exe) means $script:HasNode set by Stage-Node
-        # in the previous process isn't visible here. Re-probe rather than
-        # trust the stale global -- Stage-Node already ran successfully or
-        # the bootstrap would've aborted, so npm is reachable.
-        if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
-            Write-Info "Skipping Node.js dependencies (Node not installed)"
-            return
-        }
+    # Revalidate Node AND npm, including the complete managed tree marker,
+    # in this process before any npm execution. A previous stage's flag or a
+    # bare Get-Command result is not a trust decision.
+    if (-not (Test-Node)) {
+        Write-Info "Skipping Node.js dependencies (trusted Node/npm unavailable)"
+        return
     }
 
     # npm lifecycle scripts need node.exe on the PATH visible to child
@@ -3411,10 +3805,28 @@ function Install-NodeDeps {
             # via the returned exit code, which is reliable regardless of
             # stderr noise.
             $ErrorActionPreference = "Continue"
-            $code = _Invoke-NativeWithTimeout $npmPath "install --silent" `
+            # A4: install WITHOUT lifecycle scripts (npm's allowScripts field is
+            # not honored by every supported npm major), then run ONLY the
+            # reviewed allowlisted scripts via the audited orchestrator below.
+            $code = _Invoke-NativeWithTimeout $npmPath "install --silent --ignore-scripts" `
                 $installDir $logPath $nodeDepsTimeoutSec
             $ErrorActionPreference = $prevEAP
             if ($code -eq 0) {
+                # A4: run ONLY the allowlisted lifecycle scripts (electron
+                # binary, node-pty prebuild, ...). get-windows never runs.
+                $orchestrator = Join-Path $installDir "apps\desktop\scripts\run-allowed-lifecycle.mjs"
+                if (Test-Path $orchestrator) {
+                    $nodeForOrch = Join-Path (Split-Path -Parent $npmPath) "node.exe"
+                    if (-not (Test-Path $nodeForOrch)) { $nodeForOrch = "node" }
+                    $ErrorActionPreference = "Continue"
+                    $orchCode = _Invoke-NativeWithTimeout $nodeForOrch "`"$orchestrator`"" `
+                        $installDir $logPath $nodeDepsTimeoutSec
+                    $ErrorActionPreference = $prevEAP
+                    if ($orchCode -ne 0) {
+                        Write-Warn "$label allowlisted lifecycle scripts failed (exit $orchCode) -- native setup (electron/node-pty) may be incomplete; re-run the installer."
+                        return $false
+                    }
+                }
                 Write-Success "$label dependencies installed"
                 Remove-Item -Force $logPath -ErrorAction SilentlyContinue
                 return $true
@@ -3439,7 +3851,7 @@ function Install-NodeDeps {
                     Write-NpmDebugLogTail -NpmOutput $errText
                 }
             }
-            Write-Info "Run manually later: cd `"$installDir`"; npm install"
+            Write-Info "Run manually later: cd `"$installDir`"; npm ci --ignore-scripts; node apps/desktop/scripts/run-allowed-lifecycle.mjs"
             return $false
         } catch {
             if ($prevEAP) { $ErrorActionPreference = $prevEAP }
@@ -3462,7 +3874,12 @@ function Install-NodeDeps {
         # browser_* tools are silently filtered out of the agent's tool schema.
         # System Chrome at "C:\Program Files\Google\Chrome\..." is NOT used by
         # agent-browser -- it expects a Playwright-managed Chromium.
-        if ($browserNpmOk) {
+        if ($browserNpmOk -and ($env:_HERMES_SC_BOOTSTRAP_OVERRIDE -ne "1")) {
+            # Supply-chain gate (WP4): the Playwright Chromium download is an
+            # unverified browser payload. Disabled by default.
+            Write-Warn "Playwright Chromium download is disabled by default (supply-chain enforce); browser tools stay disabled until you install it."
+            Write-Info "Re-run install.ps1 -AllowUnverifiedBootstrap, or run 'npx playwright install chromium' manually. See docs/security/supply-chain-migration.md"
+        } elseif ($browserNpmOk) {
             Write-Info "Installing browser engine (Playwright Chromium)..."
             # npx lives next to npm in the same bin dir.  Prefer .cmd to dodge
             # the same execution-policy gotcha that affects npm.ps1 (see above).
@@ -3576,18 +3993,37 @@ function Install-NodeDeps {
 # failure is non-fatal (browser_exec can still run via uvx, and `hermes tools`
 # can install it later).
 function Install-BrowserUseCli {
-    if (-not $script:UvCmd) { Resolve-UvCmd }
+    # A1: revalidate every use (not just when unset) so a cached managed uv
+    # that lost its marker / was tampered is re-checked before the network
+    # `tool install` below. Resolve-UvCmd throws when no trusted uv exists.
+    try { Resolve-UvCmd } catch { }
     if (-not $script:UvCmd) {
         Write-Info "Skipping Browser Use CLI install (uv unavailable)"
         return
     }
     $managedBin = Join-Path $HermesHome "bin"
     $managedBu = Join-Path $managedBin "browser-use.exe"
-    # MANAGED-FIRST: only Hermes' managed copy short-circuits. A browser-use
-    # on the user's PATH is a side install -- resolution prefers the managed
-    # copy, so it must be provisioned regardless.
-    if (Test-Path $managedBu) {
-        Write-Success "Browser Use CLI already installed"
+    $toolDir = Join-Path $HermesHome "uv-tools"
+    $buTree = Join-Path $toolDir "browser-use"
+    $vpy = Join-Path $InstallDir "venv\Scripts\python.exe"
+
+    # A6: short-circuit ONLY on a marker-verified managed copy. The marker binds
+    # BOTH the launcher AND the entire tool tree; an unmarked/tampered copy is
+    # not trusted and is re-provisioned.
+    if ((Test-Path $managedBu) -and (Test-Path $vpy)) {
+        & $vpy -c "import sys; from hermes_cli.supply_chain.managed import tool_marker_ok; sys.exit(0 if tool_marker_ok(sys.argv[1], tree_dir=sys.argv[2], component='browser-use') else 1)" $managedBu $buTree 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Success "Browser Use CLI already installed"
+            return
+        }
+    }
+
+    # A7: 'uv tool install browser-use' resolves an UNPINNED package from the
+    # network. Disabled by default (supply-chain enforce): ZERO uv calls unless
+    # the operator opted in (-AllowUnverifiedBootstrap sets the internal bridge).
+    if ($env:_HERMES_SC_BOOTSTRAP_OVERRIDE -ne "1") {
+        Write-Info "Browser Use CLI auto-install disabled by default (supply-chain enforce): it resolves an unpinned package from the network."
+        Write-Info "Re-run install.ps1 -AllowUnverifiedBootstrap, or install later via 'hermes tools'."
         return
     }
 
@@ -3595,12 +4031,18 @@ function Install-BrowserUseCli {
     $prevEAP = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     try {
-        # UV_TOOL_BIN_DIR keeps the binary inside Hermes' managed bin dir,
-        # where the browser tool resolves it -- no reliance on the user PATH.
+        # Profile-scoped UV_TOOL_DIR + UV_TOOL_BIN_DIR keep the launcher AND the
+        # tool env inside Hermes, where the browser tool marker-verifies it.
+        $env:UV_TOOL_DIR = $toolDir
         $env:UV_TOOL_BIN_DIR = $managedBin
         $env:UV_NO_CONFIG = "1"
         & $script:UvCmd tool install browser-use 2>&1 | Out-Null
         if ($LASTEXITCODE -eq 0) {
+            # A6: publish the launcher+tree provenance marker via the installed
+            # hermes so the Python resolver trusts this copy.
+            if ((Test-Path $managedBu) -and (Test-Path $vpy)) {
+                & $vpy -c "import sys; from hermes_cli.supply_chain.managed import write_tool_marker; write_tool_marker(sys.argv[1], tree_dir=sys.argv[2], component='browser-use', version='installed', provenance='operator_compat_opt_in')" $managedBu $buTree 2>$null
+            }
             Write-Success "Browser Use CLI installed"
         } else {
             Write-Warn "Browser Use CLI install failed (exit $LASTEXITCODE) -- browser automation falls back to built-in tools."
@@ -3610,6 +4052,7 @@ function Install-BrowserUseCli {
         Write-Warn "Browser Use CLI install failed: $_"
     } finally {
         $ErrorActionPreference = $prevEAP
+        Remove-Item Env:\UV_TOOL_DIR -ErrorAction SilentlyContinue
         Remove-Item Env:\UV_TOOL_BIN_DIR -ErrorAction SilentlyContinue
         Remove-Item Env:\UV_NO_CONFIG -ErrorAction SilentlyContinue
     }
@@ -3684,6 +4127,16 @@ function Install-CuaDriver {
             return
         }
         Write-Warn "Existing cua-driver is old or incomplete; repairing it"
+    }
+
+    # Supply-chain gate (WP4): the cua-driver installer runs code from a mutable
+    # upstream branch. Disabled by default; an existing compatible driver is
+    # preserved. Requires an explicit operator opt-in.
+    $cuaOptIn = ($env:_HERMES_SC_BOOTSTRAP_OVERRIDE -eq "1")
+    if (-not $cuaOptIn) {
+        Write-Warn "cua-driver auto-install is disabled by default (supply-chain enforce)."
+        Write-Info "Install cua-driver manually per trycua/cua, or re-run install.ps1 -AllowUnverifiedBootstrap. See docs/security/supply-chain-migration.md"
+        return
     }
 
     Write-Info "Installing Computer Use driver (cua-driver)..."
@@ -3847,9 +4300,19 @@ function Install-DesktopVoiceDeps {
     # multi-minute onnxruntime pip install that froze the UI and blew RPC
     # timeouts. Best-effort -- lazy install remains the fallback for anything
     # this step fails to fetch.
-    if (-not $script:UvCmd) { Resolve-UvCmd }
+    # A1: revalidate every use so a cached managed uv that lost its marker is
+    # re-checked before the pip pre-install below.
+    try { Resolve-UvCmd } catch { }
     if (-not $script:UvCmd) {
         Write-Warn "uv unavailable -- voice/wake deps will lazy-install at first use instead"
+        return
+    }
+    # Supply-chain (WP4 A7): the voice/wake pre-install re-resolves onnxruntime/
+    # faster-whisper from PyPI without hash verification. Disabled by default;
+    # lazy first-use install (already gated) remains the fallback. Opt in with
+    # -AllowUnverifiedBootstrap to pre-install here.
+    if (-not (Test-UnverifiedPipFallbackAllowed)) {
+        Write-Warn "Voice/wake dependency pre-install is disabled by default (supply-chain enforce); they will lazy-install at first use, or re-run install.ps1 -AllowUnverifiedBootstrap."
         return
     }
     $env:VIRTUAL_ENV = "$InstallDir\venv"
@@ -3953,11 +4416,16 @@ function Install-Desktop {
         # is the artifact), but on failure we scan $npmOut for the TLS-trust
         # signature so corporate-proxy users get the NODE_EXTRA_CA_CERTS hint
         # instead of an opaque "exit 1" (issue #38016).
-        & $npmExe ci 2>&1 | ForEach-Object { "$_" } | Tee-Object -Variable npmOut
+        # A4: install WITHOUT lifecycle scripts (npm's allowScripts field is not
+        # honored by every supported npm major, so --ignore-scripts is the
+        # version-independent guarantee no dependency runs arbitrary install-time
+        # code). Only the reviewed, allowlisted lifecycle scripts run afterwards,
+        # via the audited orchestrator (get-windows never runs).
+        & $npmExe ci --ignore-scripts 2>&1 | ForEach-Object { "$_" } | Tee-Object -Variable npmOut
         $code = $LASTEXITCODE
         if ($code -ne 0) {
             Write-Info "  npm ci failed (exit $code) -- retrying with npm install..."
-            & $npmExe install 2>&1 | ForEach-Object { "$_" } | Tee-Object -Variable npmOut
+            & $npmExe install --ignore-scripts 2>&1 | ForEach-Object { "$_" } | Tee-Object -Variable npmOut
             $code = $LASTEXITCODE
         }
         $ErrorActionPreference = $prevEAP
@@ -3974,6 +4442,20 @@ function Install-Desktop {
                 throw "desktop workspace npm install failed (exit $code) -- see lines above for cause"
             }
         } else {
+            # A4: run ONLY the reviewed, allowlisted lifecycle scripts (electron
+            # binary, node-pty prebuild, ...). get-windows never runs.
+            $orchestrator = Join-Path $InstallDir "apps\desktop\scripts\run-allowed-lifecycle.mjs"
+            if (Test-Path $orchestrator) {
+                $nodeForOrch = Join-Path (Split-Path -Parent $npmExe) "node.exe"
+                if (-not (Test-Path $nodeForOrch)) { $nodeForOrch = "node" }
+                $ErrorActionPreference = "Continue"
+                & $nodeForOrch "$orchestrator" 2>&1 | ForEach-Object { "$_" }
+                $orchCode = $LASTEXITCODE
+                $ErrorActionPreference = $prevEAP
+                if ($orchCode -ne 0) {
+                    throw "desktop allowlisted lifecycle scripts failed (exit $orchCode) -- native setup (electron/node-pty) is incomplete"
+                }
+            }
             Write-Success "Desktop workspace dependencies installed"
         }
     } catch {
@@ -4307,6 +4789,19 @@ function Install-PlatformSdks {
         $ErrorActionPreference = $prevEAP
     }
     if ($missing.Count -eq 0) { return }
+
+    # A7: the SDK installs below are RANGED pip installs that re-resolve from
+    # PyPI without hash verification. Disabled by default (supply-chain
+    # enforce) -- the missing SDK lazy-installs at first use, or the operator
+    # opts in with -AllowUnverifiedBootstrap. Fail closed BEFORE bootstrapping
+    # pip or fetching anything.
+    if (-not (Test-UnverifiedPipFallbackAllowed)) {
+        Write-Warn "Platform SDK auto-install is disabled by default (supply-chain enforce): these are ranged, unpinned pip installs."
+        foreach ($sdk in $missing) {
+            Write-Info "  Missing: $($sdk.Spec) (for $($sdk.Var)) -- lazy-installs at first use, or re-run install.ps1 -AllowUnverifiedBootstrap."
+        }
+        return
+    }
 
     # Bootstrap pip into the venv if it isn't there.  `uv` creates venvs
     # without pip; ensurepip is the stdlib-blessed way to add it.
@@ -4801,6 +5296,13 @@ function Main {
 # All branches funnel through one try/catch so errors don't kill an `irm |
 # iex` PowerShell session, and so failures in stage-driver mode produce a
 # structured JSON error frame instead of a bare exception.
+
+# Supply-chain (WP4 A7) behavioral-test hook: when set, dot-sourcing this
+# script defines every function and returns WITHOUT running the installer, so
+# tests can invoke individual functions (e.g. the pip-fallback gate) against
+# real stubs. This is an internal test bridge, never a user-facing knob, and
+# is unset in every real install path (curl|iex, stage drivers, Main).
+if ($env:_HERMES_PS_DOTSOURCE_ONLY -eq "1") { return }
 
 try {
     if ($Ensure -ne "") {

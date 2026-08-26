@@ -8,7 +8,7 @@ const root = resolve(app, "..", "..")
 try {
   accessSync(join(root, "node_modules", "vite", "package.json"))
 } catch {
-  console.error(`Run from repo root: cd ${root} && npm ci`)
+  console.error(`Run from repo root: cd ${root} && npm ci --ignore-scripts && node apps/desktop/scripts/run-allowed-lifecycle.mjs`)
   process.exit(1)
 }
 
@@ -29,7 +29,7 @@ if (react !== reactDom) {
   console.error(
     `react@${react} / react-dom@${reactDom} version mismatch — React would fail ` +
       `with error #527 and render a blank window. Pin both to the same version ` +
-      `in ${join(app, "package.json")}, then reinstall: cd ${root} && npm ci`
+      `in ${join(app, "package.json")}, then reinstall: cd ${root} && npm ci --ignore-scripts && node apps/desktop/scripts/run-allowed-lifecycle.mjs`
   )
   process.exit(1)
 }

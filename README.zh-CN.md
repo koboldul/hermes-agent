@@ -31,11 +31,18 @@
 
 ## 快速安装
 
+> **前置条件——请先安装 `uv`。** Hermes 使用 [`uv`](https://docs.astral.sh/uv/)（Astral 的包管理器）来构建其 Python 环境。出于供应链安全考虑，安装程序**不会**自动下载 `uv`，而是使用由操作者安装的 `uv`；若缺失则会停止并给出提示。请先安装它，再运行下方命令：
+>
+> - **Linux / macOS / WSL2：** `pipx install uv`——或 `brew install uv`——或参见 [uv 官方安装指南](https://docs.astral.sh/uv/getting-started/installation/)。
+> - **Windows（PowerShell）：** `winget install astral-sh.uv`
+>
+> 用 `uv --version` 确认。Node.js 和 Git 同理——若安装程序报告缺失，请用你的包管理器安装。（**Android/Termux 例外**——它使用 Python 标准库的 `venv` + `pip`，无需 `uv`。）
+
 ```bash
 curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
 ```
 
-支持 Linux、macOS、WSL2 和 Android (Termux)。安装程序会自动处理平台特定的配置。
+支持 Linux、macOS、WSL2 和 Android (Termux)。安装程序会自动处理平台特定的配置。若 `uv`、Node.js 或 Git 缺失，安装程序会停止并给出确切的安装命令，而不会下载未经验证的二进制文件。
 
 > **Android / Termux：** 已测试的手动安装路径请参考 [Termux 指南](https://hermes-agent.nousresearch.com/docs/getting-started/termux)。在 Termux 上，Hermes 会安装精选的 `.[termux]` 扩展，因为完整的 `.[all]` 扩展会拉取 Android 不兼容的语音依赖。
 >

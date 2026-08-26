@@ -495,9 +495,12 @@ def _reinstall_sidecar_deps() -> None:
 
     Mirrors ``hermes photon install-sidecar``: ``npm ci`` for an exact,
     reproducible install, falling back to ``npm install`` if the lockfile is
-    missing or drifted. Runs the postinstall patch as part of the install.
-    Best-effort — a failure here just leaves the (stale) deps in place and the
-    normal ``_start_sidecar`` readiness check reports the real error.
+    missing or drifted. A4 audited lifecycle: the install uses
+    ``--ignore-scripts`` (no dependency runs arbitrary install-time code) and
+    the sidecar's ONE reviewed first-party ``postinstall`` (the spectrum-ts
+    patch) is then run explicitly. Best-effort — a failure here just leaves the
+    (stale) deps in place and the normal ``_start_sidecar`` readiness check
+    reports the real error.
     """
     npm = shutil.which("npm")
     if not npm:
@@ -509,7 +512,7 @@ def _reinstall_sidecar_deps() -> None:
 
     try:
         result = subprocess.run(  # noqa: S603
-            [npm, "ci"],
+            [npm, "ci", "--ignore-scripts"],
             cwd=str(_sidecar_dir()),
             capture_output=True,
             text=True, encoding="utf-8", errors="replace",
@@ -522,7 +525,7 @@ def _reinstall_sidecar_deps() -> None:
                 "[photon] sidecar `npm ci` failed; falling back to `npm install`"
             )
             result = subprocess.run(  # noqa: S603
-                [npm, "install"],
+                [npm, "install", "--ignore-scripts"],
                 cwd=str(_sidecar_dir()),
                 capture_output=True,
                 text=True, encoding="utf-8", errors="replace",
@@ -546,6 +549,15 @@ def _reinstall_sidecar_deps() -> None:
             (result.stderr or result.stdout or "").strip(),
         )
     else:
+        # A4: run ONLY the reviewed first-party lifecycle script (the install
+        # above ran with --ignore-scripts, so no dependency hook executed).
+        from .sidecar_paths import run_sidecar_patch
+
+        run_sidecar_patch(
+            _sidecar_dir(),
+            timeout=_NPM_REINSTALL_TIMEOUT,
+            hide_windows_console=True,
+        )
         logger.info("[photon] sidecar dependencies reinstalled from lockfile")
 
 
@@ -1610,7 +1622,7 @@ class PhotonAdapter(BasePlatformAdapter):
                 raise PhotonSidecarStartupError(
                     f"Photon sidecar deps could not be installed into "
                     f"{_sidecar_dir()} (see log for the npm error). "
-                    f"Run: cd {_sidecar_dir()} && npm ci   (or `hermes photon setup`)",
+                    f"Run: cd {_sidecar_dir()} && npm ci --ignore-scripts && node patch-spectrum-mixed-attachments.mjs   (or `hermes photon setup`)",
                     code="SIDECAR_DEPS_MISSING",
                     retryable=False,
                 )

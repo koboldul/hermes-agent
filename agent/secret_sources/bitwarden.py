@@ -150,11 +150,28 @@ def find_bws(*, install_if_missing: bool = False) -> Optional[Path]:
     """
     managed = _hermes_bin_dir() / _platform_binary_name()
     if managed.exists() and os.access(managed, os.X_OK):
-        return managed
+        # A6: a managed bws is trusted only with a current provenance marker;
+        # an unmarked (legacy) or tampered binary is ignored in favour of an
+        # operator PATH bws.
+        try:
+            from hermes_cli.supply_chain.managed import managed_ok
+
+            _marked = managed_ok(managed, component="bws")
+        except Exception:
+            _marked = False
+        if _marked:
+            return managed
+        logger.info("managed bws at %s has no current provenance marker; ignoring it (A6)", managed)
 
     system = shutil.which("bws")
     if system:
-        return Path(system)
+        # A6 alias-bypass: reject a PATH/symlink/junction/case alias that lands
+        # on the (unmarked) managed bws; accept a genuine operator bws.
+        from hermes_cli.supply_chain.managed import accept_operator_path
+
+        accepted = accept_operator_path(system, component="bws")
+        if accepted:
+            return Path(accepted)
 
     if install_if_missing:
         try:
@@ -225,7 +242,36 @@ def install_bws(*, force: bool = False) -> Path:
     target = bin_dir / _platform_binary_name()
 
     if target.exists() and not force:
-        return target
+        # A6: return an existing managed bws ONLY with a current provenance
+        # marker. An unmarked (legacy) or tampered binary is quarantined here —
+        # before any installer fallback — so it can never be returned/executed
+        # on existence alone; resolution then proceeds to the gated install.
+        from hermes_cli.supply_chain.managed import managed_ok, quarantine_unmarked
+
+        if managed_ok(target, component="bws"):
+            return target
+        quarantine_unmarked(target, component="bws")
+
+    # Supply-chain gate (WP4): bws is downloaded with a same-channel checksum
+    # (transport-trusted, not release-verified — no committed digest). Disabled
+    # by default; the operator allows it in config:
+    # security.supply_chain.allow_unverified_components: ["bws"]. An existing
+    # operator-managed bws is used in place.
+    try:
+        from hermes_cli.supply_chain.gate import compat_opt_in
+
+        _bws_ok = compat_opt_in("bws")
+    except Exception:
+        _bws_ok = False
+    if not _bws_ok:
+        raise RuntimeError(
+            "bws (Bitwarden Secrets) auto-install is disabled by default "
+            "(supply-chain enforce): its checksum is fetched over the same "
+            "channel as the binary. Install bws manually and place it on PATH, "
+            "or allow it in config: security.supply_chain."
+            "allow_unverified_components: [\"bws\"]. See "
+            "docs/security/supply-chain-migration.md."
+        )
 
     asset_name = _platform_asset_name()
     asset_url = f"{_BWS_RELEASE_BASE}/{asset_name}"
@@ -268,6 +314,16 @@ def install_bws(*, force: bool = False) -> Path:
             | stat.S_IROTH | stat.S_IXOTH,
         )
         os.replace(staged, target)
+
+    # A6: record a provenance marker so this managed bws is trusted on the next
+    # resolve (an unmarked legacy binary is ignored).
+    try:
+        from hermes_cli.supply_chain.managed import write_marker
+
+        write_marker(target, component="bws", version=_BWS_VERSION,
+                     provenance="operator_compat_opt_in")
+    except Exception as exc:  # pragma: no cover - marker best-effort
+        logger.warning("could not write bws provenance marker: %s", exc)
 
     logger.info("Installed bws %s at %s", _BWS_VERSION, target)
     return target

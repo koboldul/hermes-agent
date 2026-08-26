@@ -21,8 +21,8 @@ const BASE = HERMES_BASE_PATH;
 
 import type { DashboardTheme } from "@/themes/types";
 import {
-  attemptDashboardTokenReloadOnce,
-  clearDashboardTokenReloadAttempt,
+  attemptDashboardReloadOnce,
+  clearDashboardReloadAttempt,
 } from "@/lib/dashboard-auth-reload";
 
 // Ephemeral session token for protected endpoints.
@@ -36,9 +36,132 @@ declare global {
      * WS-upgrade path from legacy ``?token=`` to single-use ``?ticket=``
      * fetched via :func:`getWsTicket`. */
     __HERMES_AUTH_REQUIRED__?: boolean;
+    /** Server-injected flag: ``true`` in the loopback browser dashboard
+     * (SEC-AUDIT-001). The SPA renders a bootstrap-code form, exchanges the
+     * terminal-displayed code for an HttpOnly session cookie, and thereafter
+     * authenticates by cookie + a session-bound anti-CSRF token. No reusable
+     * credential is ever present in the HTML. */
+    __HERMES_LOCAL_BROWSER_AUTH__?: boolean;
   }
 }
 const SESSION_HEADER = "X-Hermes-Session-Token";
+const CSRF_HEADER = "X-Hermes-CSRF-Token";
+const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+/** True when the loopback local-browser bootstrap mode is active. */
+export function isLocalBrowserAuthMode(): boolean {
+  return typeof window !== "undefined" && !!window.__HERMES_LOCAL_BROWSER_AUTH__;
+}
+
+/** True when the browser authenticates via a dashboard *session* (gated
+ * OAuth/password OR loopback local-browser bootstrap) rather than a static
+ * injected token. Browser features must treat this as "authenticated";
+ * they must not require ``__HERMES_SESSION_TOKEN__`` in either mode. */
+export function hasBrowserSessionAuth(): boolean {
+  return cookieAuthMode();
+}
+
+// Session-bound anti-CSRF token for cookie-authenticated unsafe requests.
+// Kept ONLY in memory — never localStorage/sessionStorage/logs — and attached
+// through the shared fetch wrappers so no individual route can opt out. It is
+// re-fetchable after a reload via ``GET /api/auth/csrf``.
+let _csrfToken = "";
+
+export function getCsrfToken(): string {
+  return _csrfToken;
+}
+
+function setCsrfToken(token: string): void {
+  _csrfToken = token || "";
+}
+
+function isUnsafeMethod(init?: RequestInit): boolean {
+  const method = (init?.method || "GET").toUpperCase();
+  return UNSAFE_METHODS.has(method);
+}
+
+/** True when this dashboard authenticates browser requests by cookie (gated
+ * OAuth/password OR loopback local-browser) rather than a static token. */
+function cookieAuthMode(): boolean {
+  if (typeof window === "undefined") return false;
+  return !!window.__HERMES_AUTH_REQUIRED__ || !!window.__HERMES_LOCAL_BROWSER_AUTH__;
+}
+
+function attachCsrf(headers: Headers, init?: RequestInit): void {
+  if (_csrfToken && isUnsafeMethod(init) && !headers.has(CSRF_HEADER)) {
+    headers.set(CSRF_HEADER, _csrfToken);
+  }
+}
+
+/** True when a 403 body is a CSRF rejection (stale token after an access-token
+ * rotation, or a first request before the token loaded). */
+function isCsrfFailure(status: number, body: { detail?: string }): boolean {
+  return (
+    status === 403 &&
+    typeof body?.detail === "string" &&
+    body.detail.toLowerCase().includes("csrf")
+  );
+}
+
+/** Fetch (or re-fetch) the session-bound anti-CSRF token for the current
+ * cookie session. Returns ``true`` when authenticated (token stored),
+ * ``false`` on 401 (not yet authenticated). */
+export async function refreshCsrfToken(): Promise<boolean> {
+  try {
+    const res = await fetch(`${BASE}/api/auth/csrf`, {
+      method: "GET",
+      credentials: "include",
+    });
+    if (!res.ok) {
+      if (res.status === 401) setCsrfToken("");
+      return false;
+    }
+    const body = (await res.json()) as { csrf_token?: string };
+    setCsrfToken(body.csrf_token || "");
+    return !!_csrfToken;
+  } catch {
+    return false;
+  }
+}
+
+/** Exchange the one-time terminal bootstrap code for a local session cookie.
+ * On success the anti-CSRF token is captured in memory. Throws on failure so
+ * the bootstrap form can surface a bounded retry. */
+export async function exchangeBootstrapCode(code: string): Promise<void> {
+  const res = await fetch(`${BASE}/api/auth/local/bootstrap`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ code }),
+  });
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const body = (await res.json()) as { detail?: string };
+      if (body.detail) detail = body.detail;
+    } catch {
+      /* non-JSON error */
+    }
+    throw new Error(detail);
+  }
+  const body = (await res.json()) as { csrf_token?: string };
+  setCsrfToken(body.csrf_token || "");
+}
+
+/** Revoke the server-side local session and clear the cookie. */
+export async function localLogout(): Promise<void> {
+  const headers = new Headers();
+  attachCsrf(headers, { method: "POST" });
+  try {
+    await fetch(`${BASE}/api/auth/local/logout`, {
+      method: "POST",
+      credentials: "include",
+      headers,
+    });
+  } finally {
+    setCsrfToken("");
+  }
+}
 
 function setSessionHeader(headers: Headers, token: string): void {
   if (!headers.has(SESSION_HEADER)) {
@@ -111,7 +234,10 @@ export async function fetchJSON<T>(
   if (token) {
     setSessionHeader(headers, token);
   }
-  const res = await fetch(`${BASE}${url}`, {
+  // Cookie-authenticated unsafe requests carry the session-bound anti-CSRF
+  // token. No-op for safe methods or when no token has been fetched yet.
+  attachCsrf(headers, init);
+  let res = await fetch(`${BASE}${url}`, {
     ...init,
     headers,
     // ``credentials: 'include'`` so the cookie-auth path (gated mode) works
@@ -120,6 +246,27 @@ export async function fetchJSON<T>(
     // already attached above.
     credentials: init?.credentials ?? "include",
   });
+  if (res.status === 403 && isUnsafeMethod(init) && cookieAuthMode()) {
+    // A CSRF 403 after an access-token rotation (the derived token no longer
+    // matches the rotated cookie) is recoverable: re-fetch the session-bound
+    // token once and retry. Never loops — a second 403 falls through.
+    let body: { detail?: string } = {};
+    try {
+      body = await res.clone().json();
+    } catch {
+      /* non-JSON */
+    }
+    if (isCsrfFailure(res.status, body) && (await refreshCsrfToken())) {
+      const retryHeaders = new Headers(init?.headers);
+      if (token) setSessionHeader(retryHeaders, token);
+      attachCsrf(retryHeaders, init);
+      res = await fetch(`${BASE}${url}`, {
+        ...init,
+        headers: retryHeaders,
+        credentials: init?.credentials ?? "include",
+      });
+    }
+  }
   if (res.status === 401) {
     // Phase 6: the gated middleware emits a structured envelope so the
     // SPA can full-page-navigate to /login on session expiry. Parse it,
@@ -154,26 +301,23 @@ export async function fetchJSON<T>(
       // Never resolve — the page is about to unload.
       return new Promise<T>(() => {});
     }
-    // Loopback mode: ``_SESSION_TOKEN`` rotates on every server restart
-    // (``hermes update``, ``hermes gateway restart``, etc.). A tab kept
-    // open across the restart holds the OLD token in
-    // ``window.__HERMES_SESSION_TOKEN__`` from the previous HTML render,
-    // so every fetch returns 401. The HTML is served ``Cache-Control:
-    // no-store`` so a reload picks up the freshly-injected token. Trigger
-    // that reload once on the first stale-token 401 — gated mode is
-    // handled above, so reaching here in gated mode means a real
-    // middleware failure that should not reload-loop.
-    if (!window.__HERMES_AUTH_REQUIRED__ && !options?.allowUnauthorized) {
-      if (attemptDashboardTokenReloadOnce()) {
+    // Local-browser mode: no token is injected into the SPA, so a 401 is an
+    // expired/absent session cookie — not a "stale token". Reload once to
+    // return to the LocalBrowserAuthGate, which re-checks the cookie and shows
+    // the bootstrap-code form when it is gone. Clear the in-memory CSRF token
+    // so a re-auth starts clean. Gated mode is handled by the structured
+    // ``session_expired`` redirect above.
+    if (isLocalBrowserAuthMode() && !options?.allowUnauthorized) {
+      setCsrfToken("");
+      if (attemptDashboardReloadOnce()) {
         return new Promise<T>(() => {});
       }
     }
   }
   if (res.ok) {
-    // Clear the stale-token reload guard: a successful 2xx proves the
-    // current ``window.__HERMES_SESSION_TOKEN__`` is valid, so the next
-    // 401 — if any — should be allowed to trigger its own reload cycle.
-    clearDashboardTokenReloadAttempt();
+    // Clear the reload latch: a successful 2xx proves the session is valid,
+    // so a later 401 is allowed to trigger its own return-to-gate reload.
+    clearDashboardReloadAttempt();
   }
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
@@ -200,10 +344,21 @@ function pluginPath(name: string): string {
  * fetch a fresh ticket.
  */
 export async function getWsTicket(): Promise<{ ticket: string; ttl_seconds: number }> {
-  const res = await fetch(`${BASE}/api/auth/ws-ticket`, {
-    method: "POST",
-    credentials: "include",
-  });
+  const mint = async () => {
+    const headers = new Headers();
+    attachCsrf(headers, { method: "POST" });
+    return fetch(`${BASE}/api/auth/ws-ticket`, {
+      method: "POST",
+      credentials: "include",
+      headers,
+    });
+  };
+  let res = await mint();
+  if (res.status === 403 && cookieAuthMode() && (await refreshCsrfToken())) {
+    // Missing/stale CSRF (first unsafe request, or after an access-token
+    // rotation) — refresh the session-bound token once and retry.
+    res = await mint();
+  }
   if (!res.ok) {
     throw new Error(`/api/auth/ws-ticket: HTTP ${res.status}`);
   }
@@ -212,11 +367,13 @@ export async function getWsTicket(): Promise<{ ticket: string; ttl_seconds: numb
 
 /**
  * Resolve the auth query-param pair (``[name, value]``) for a WebSocket
- * connect. In gated mode mints a fresh single-use ticket; in loopback
- * mode returns the injected session token.
+ * connect. In gated mode AND loopback local-browser mode this mints a fresh
+ * single-use ``ticket`` from the session cookie (the legacy query token is
+ * never browser-reachable there); only a trusted service/headless caller that
+ * actually holds a token falls back to ``token``.
  */
 export async function buildWsAuthParam(): Promise<[string, string]> {
-  if (window.__HERMES_AUTH_REQUIRED__) {
+  if (window.__HERMES_AUTH_REQUIRED__ || window.__HERMES_LOCAL_BROWSER_AUTH__) {
     const { ticket } = await getWsTicket();
     return ["ticket", ticket];
   }
@@ -230,10 +387,13 @@ export async function buildWsAuthParam(): Promise<[string, string]> {
  * Mirrors ``fetchJSON``'s auth handling but returns the raw ``Response`` so
  * the caller can read ``.blob()`` / ``.formData()`` / stream it.
  *
- * Auth, in both modes, exactly as ``fetchJSON`` does it:
- *  - loopback / ``--insecure``: attach the ``X-Hermes-Session-Token`` header.
- *  - gated OAuth: no token header (it's absent by design); the
- *    ``hermes_session_at`` cookie rides along via ``credentials: 'include'``.
+ * Auth handling matches ``fetchJSON``:
+ *  - trusted service/headless caller: the ``X-Hermes-Session-Token`` header is
+ *    attached only when a token is actually present (never in a browser session
+ *    — no token is injected into the SPA);
+ *  - browser session (gated OAuth/password OR loopback local-browser): the
+ *    session cookie rides along via ``credentials: 'include'``, and the CSRF
+ *    token is attached on unsafe methods.
  *
  * Unlike ``fetchJSON`` this does NOT parse the body, does NOT throw on
  * non-2xx (the caller decides — a 404 on a download is meaningful), and
@@ -250,6 +410,7 @@ export async function authedFetch(
   if (token) {
     setSessionHeader(headers, token);
   }
+  attachCsrf(headers, init);
   return fetch(`${BASE}${url}`, {
     ...init,
     headers,
@@ -259,11 +420,12 @@ export async function authedFetch(
 
 /**
  * Build an absolute ``ws(s)://`` URL for a dashboard WebSocket endpoint,
- * with the correct auth query param appended for the active mode (fresh
- * single-use ``ticket`` in gated mode, ``token`` in loopback). Plugins and
- * the SPA should use this instead of hand-assembling a WS URL + reading
- * ``window.__HERMES_SESSION_TOKEN__`` directly, so the gated-mode ticket
- * path can never be forgotten.
+ * with the correct auth query param appended for the active mode (a fresh
+ * single-use ``ticket`` in gated OR loopback local-browser mode; ``token``
+ * only for a trusted service caller). Plugins and the SPA should use this
+ * instead of hand-assembling a WS URL + reading
+ * ``window.__HERMES_SESSION_TOKEN__`` directly, so the ticket path can never
+ * be forgotten.
  *
  * ``path`` is the dashboard-relative path (e.g.
  * ``"/api/plugins/kanban/events"``); the base-path prefix and host are
@@ -358,17 +520,26 @@ export const api = {
     fetchJSON<AuthMeResponse>("/api/auth/me", undefined, {
       allowUnauthorized: true,
     }),
-  logout: () =>
-    fetch(`${BASE}/auth/logout`, {
+  logout: async () => {
+    // /auth/logout is now a CSRF-protected unsafe cookie request (provider
+    // and local sessions alike). Ensure + attach the session-bound token,
+    // fetching it first if the app hasn't cached one yet.
+    if (!getCsrfToken() && cookieAuthMode()) {
+      await refreshCsrfToken();
+    }
+    const headers = new Headers();
+    attachCsrf(headers, { method: "POST" });
+    const r = await fetch(`${BASE}/auth/logout`, {
       method: "POST",
       credentials: "include",
-    }).then((r) => {
-      // /auth/logout returns 302 → /login. Follow that with a full-page
-      // navigation rather than letting fetch() opaquely consume the
-      // redirect — the SPA needs to leave the protected area.
-      window.location.assign("/login");
-      return r;
-    }),
+      headers,
+    });
+    // /auth/logout returns 302 → /login. Follow that with a full-page
+    // navigation rather than letting fetch() opaquely consume the
+    // redirect — the SPA needs to leave the protected area.
+    window.location.assign("/login");
+    return r;
+  },
   getSessions: (
     limit = 20,
     offset = 0,

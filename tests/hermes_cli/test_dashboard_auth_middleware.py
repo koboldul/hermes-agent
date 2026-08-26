@@ -177,10 +177,14 @@ def test_gated_require_token_endpoint_accepts_cookie_session(gated_app):
     coupling to the validation message.
     """
     _complete_stub_login(gated_app)
+    # Cookie-authenticated unsafe request → the CSRF owner requires an exact
+    # same-origin match + the session-bound token (fetched from /api/auth/csrf).
+    csrf = gated_app.get("/api/auth/csrf").json()["csrf_token"]
     r = gated_app.post(
         "/api/dashboard/agent-plugins/install",
         json={"identifier": "definitely not a valid identifier",
               "force": False, "enable": False},
+        headers={"origin": "https://fly-app.fly.dev", "X-Hermes-CSRF-Token": csrf},
     )
     assert r.status_code != 401, (
         "A _require_token endpoint 401'd a cookie-authenticated request under "
@@ -191,6 +195,27 @@ def test_gated_require_token_endpoint_accepts_cookie_session(gated_app):
         f"Expected the install handler's 400 (bad identifier), got "
         f"{r.status_code}: {r.text}"
     )
+
+
+def test_gated_cookie_unsafe_request_requires_csrf(gated_app):
+    """The single CSRF owner covers provider (OAuth) sessions too: a
+    cookie-authenticated unsafe request with no anti-CSRF token is 403, and a
+    valid token from a foreign origin still fails the exact-origin gate."""
+    _complete_stub_login(gated_app)
+    missing = gated_app.post(
+        "/api/dashboard/agent-plugins/install",
+        json={"identifier": "x", "force": False, "enable": False},
+        headers={"origin": "https://fly-app.fly.dev"},
+    )
+    assert missing.status_code == 403, missing.text
+
+    csrf = gated_app.get("/api/auth/csrf").json()["csrf_token"]
+    cross = gated_app.post(
+        "/api/dashboard/agent-plugins/install",
+        json={"identifier": "x", "force": False, "enable": False},
+        headers={"origin": "https://evil.example.com", "X-Hermes-CSRF-Token": csrf},
+    )
+    assert cross.status_code == 403, cross.text
 
 
 # A representative spread of the OTHER ``_require_token`` endpoints (there are

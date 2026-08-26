@@ -56,6 +56,16 @@ real language server. Two channels, independent signals — the
 agent sees a syntax-clean file with semantic problems as
 ``lint: ok`` plus a populated ``lsp_diagnostics``.
 
+:::danger Temporary hardening guidance
+Current releases default to `lsp.install_strategy: auto`. A missing server can
+therefore be installed from a mutable package reference, and installer/server
+children inherit more of the Hermes process environment than a lower-trust
+language server should receive. On credential-bearing, shared, CI, or hardened
+deployments, set `install_strategy: manual` and install reviewed servers through
+your OS or project toolchain until the fixed release provides immutable recipes,
+a purpose-specific environment allowlist, and affirmative auto-install consent.
+:::
+
 ## Supported languages
 
 | Language | Server | Auto-install |
@@ -162,7 +172,7 @@ lsp:
   # How to handle missing server binaries.
   #   auto    — install via npm/pip/go install into <HERMES_HOME>/lsp/bin
   #   manual  — only use binaries already on PATH
-  install_strategy: auto
+  install_strategy: manual  # temporary secure choice; current runtime default is auto
 
   # How long an unused language-server client stays alive (seconds).
   # Idle servers are shut down automatically and respawned on the next
@@ -192,6 +202,8 @@ lsp:
 * `command: [bin, ...args]` — pin a custom binary path. Bypasses
   auto-install.
 * `env: {KEY: value}` — extra env vars passed to the spawned process.
+  Treat these values as explicit disclosure to that language server; current
+  releases do not provide process or network isolation for it.
 * `initialization_options: {...}` — merged into the LSP
   `initializationOptions` payload sent in the `initialize`
   handshake. Server-specific; consult the language server's docs.

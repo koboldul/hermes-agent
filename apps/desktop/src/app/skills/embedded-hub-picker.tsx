@@ -2,14 +2,16 @@ import { useStore } from '@nanostores/react'
 import { memo, type PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
-import type { ProfileScope } from '@/hermes'
+import type { ProfileScope, SkillHubProposal } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { Loader2 } from '@/lib/icons'
 import { useStoreSelector } from '@/lib/use-session-slice'
 import { cn } from '@/lib/utils'
-import { $hubActions, installHubSkill, UPDATE_ALL_KEY, updateHubSkills } from '@/store/hub-actions'
+import { $hubActions, activateHubSkill, proposeHubSkill, UPDATE_ALL_KEY, updateHubSkills } from '@/store/hub-actions'
 import { notify, notifyError } from '@/store/notifications'
 import { $paneHeightOverride, setPaneHeightOverride } from '@/store/panes'
+
+import { evaluateHubMessage } from './hub-proposal'
 
 // The REAL Skills Hub page (docs site) embedded as a one-click picker — the
 // same trick the Bot Mode agent editor uses. `?embed=picker` hides the docs
@@ -35,14 +37,6 @@ const HUB_COLLAPSED_PX = 4
 // installed-skills list plus its strip) so dragging the hub up can never
 // crush the list to zero and shove its chrome under the hub header.
 const HUB_LIST_RESERVED_PX = 176
-
-interface SkillPickMessage {
-  identifier?: string
-  installCmd?: string
-  name?: string
-  source?: string
-  type?: string
-}
 
 interface EmbeddedHubPickerProps {
   /** Kept mounted but fully hidden (display:none). The Capabilities view uses
@@ -81,6 +75,18 @@ export const EmbeddedHubPicker = memo(function EmbeddedHubPicker({
   const open = height > HUB_COLLAPSED_PX
   const [dragging, setDragging] = useState(false)
   const sectionRef = useRef<HTMLElement>(null)
+  const iframeRef = useRef<HTMLIFrameElement>(null)
+  // SECURITY (A4 — Skills XPIA): a message from the embedded hub is a PROPOSAL,
+  // never an install. The pick is sent to the server (propose), which
+  // quarantines the skill and returns its TRANSPORT-RESOLVED commit + whole-
+  // bundle digest. That resolved identity is quarantined here until the user
+  // explicitly confirms it in this trusted parent UI; only then does the app
+  // call activate with the exact commit+digest, which the server re-verifies
+  // against the same quarantined artifact before installing.
+  const [pending, setPending] = useState<SkillHubProposal | null>(null)
+  // True while a pick is being resolved on the server (propose in flight) or an
+  // activation is running — blocks concurrent picks and disables the confirm.
+  const [busy, setBusy] = useState(false)
 
   // Top-edge sash: dragging UP grows the hub (shrinking the skills list above,
   // which is the flex-1 sibling). Same gesture as DetailPane / the shell's
@@ -119,43 +125,77 @@ export const EmbeddedHubPicker = memo(function EmbeddedHubPicker({
     window.addEventListener('pointerup', onUp, { once: true })
   }
 
-  // Picker messages from the embedded hub page. Origin-checked; installs route
-  // through the same store pipeline the hub rows use, so the action log,
-  // optimistic flips, and Skills-list refresh all come for free.
+  // Picker messages from the embedded hub page. Validated for EXACT origin AND
+  // EXACT source window (the hub iframe), then resolved on the SERVER into a
+  // pinned identity (propose) and QUARANTINED into `pending`. A message can
+  // never trigger an install directly (A4). The user confirms the resolved
+  // commit+digest in the dialog below, which calls activate.
   useEffect(() => {
     if (!open) {
       return undefined
     }
 
     const onMessage = (event: MessageEvent) => {
-      if (event.origin !== HUB_ORIGIN) {
+      const proposal = evaluateHubMessage(
+        { origin: event.origin, source: event.source, data: event.data },
+        { expectedOrigin: HUB_ORIGIN, expectedSource: iframeRef.current?.contentWindow ?? null }
+      )
+
+      if (!proposal) {
         return
       }
 
-      const data = event.data as SkillPickMessage | null
-
-      if (!data || data.type !== 'hermes-skill-pick' || !data.name) {
-        return
-      }
-
-      const target = String(data.identifier || data.name)
-      const label = String(data.name)
-
-      // Already installed in this scope → tell the user, don't reinstall.
-      if (installedNames.has(label) || installedNames.has(target)) {
-        notify({ kind: 'success', title: h.alreadyInstalled(label), message: '' })
+      // Already installed in this scope → tell the user, don't propose again.
+      if (installedNames.has(proposal.name) || installedNames.has(proposal.identifier)) {
+        notify({ kind: 'success', title: h.alreadyInstalled(proposal.name), message: '' })
 
         return
       }
 
-      notify({ kind: 'success', title: h.installStarted(label), message: h.actionLog })
-      void installHubSkill(target, profile).catch(err => notifyError(err, h.actionFailed))
+      // One proposal at a time: ignore further picks while resolving/confirming.
+      // `busy`/`pending` are in the effect deps so this closure reads fresh.
+      if (busy || pending) {
+        return
+      }
+
+      // Resolve the pinned identity on the server (fetch + scan + quarantine).
+      // NO install happens here — the response is only shown for confirmation.
+      setBusy(true)
+      void proposeHubSkill(proposal.identifier, profile)
+        .then(resolved => setPending(resolved))
+        .catch(err => {
+          notifyError(err, h.actionFailed)
+        })
+        .finally(() => setBusy(false))
     }
 
     window.addEventListener('message', onMessage)
 
     return () => window.removeEventListener('message', onMessage)
-  }, [h, installedNames, open, profile])
+  }, [busy, h, installedNames, open, pending, profile])
+
+  const confirmPending = () => {
+    if (!pending || busy) {
+      return
+    }
+
+    const proposal = pending
+    setBusy(true)
+    notify({ kind: 'success', title: h.installStarted(proposal.name), message: h.actionLog })
+    void activateHubSkill(proposal, profile)
+      .catch(err => notifyError(err, h.actionFailed))
+      .finally(() => {
+        // Close the dialog either way: on success it is installed; on any
+        // failure the server-side proposal is consumed, so a retry must re-pick.
+        setBusy(false)
+        setPending(null)
+      })
+  }
+
+  const cancelPending = () => {
+    setBusy(false)
+    setPending(null)
+  }
 
   const updateAll = () => {
     notify({ kind: 'success', title: h.updateStarted, message: h.actionLog })
@@ -225,6 +265,7 @@ export const EmbeddedHubPicker = memo(function EmbeddedHubPicker({
             }}
           >
             <iframe
+              ref={iframeRef}
               sandbox="allow-scripts allow-same-origin"
               src={HUB_PICKER_URL}
               style={{
@@ -242,6 +283,76 @@ export const EmbeddedHubPicker = memo(function EmbeddedHubPicker({
             />
           </div>
           <p className="shrink-0 px-1 text-[0.65rem] leading-4 text-(--ui-text-quaternary)">{h.pickerHint}</p>
+        </div>
+      )}
+
+      {/* A4 — while a pick is being resolved on the server (fetch + scan +
+          quarantine), show a blocking spinner. No install can happen until the
+          resolved identity is confirmed below. */}
+      {busy && !pending && (
+        <div
+          className="absolute inset-0 z-20 flex items-center justify-center bg-(--ui-bg-primary)/80 p-4 backdrop-blur-sm"
+          data-testid="hub-resolving"
+        >
+          <div className="flex items-center gap-2 text-[0.75rem] text-(--ui-text-tertiary)">
+            <Loader2 className="size-3 animate-spin" />
+            {h.confirmResolving}
+          </div>
+        </div>
+      )}
+
+      {/* A4 — trusted parent-UI confirmation. A hub message is a proposal; it is
+          activated ONLY after the user confirms it here. Rendered by the parent
+          app (never the iframe), so a compromised hub page cannot fabricate or
+          auto-dismiss it. */}
+      {pending && (
+        <div
+          aria-modal="true"
+          className="absolute inset-0 z-20 flex items-center justify-center bg-(--ui-bg-primary)/80 p-4 backdrop-blur-sm"
+          data-testid="hub-install-confirm"
+          role="dialog"
+        >
+          <div className="w-full max-w-sm rounded-lg border border-(--ui-stroke-secondary) bg-(--ui-bg-elevated) p-4 shadow-xl">
+            <p className="text-sm font-medium text-(--ui-text-primary)">{h.confirmTitle(pending.name)}</p>
+            <p className="mt-2 text-[0.75rem] leading-5 text-(--ui-text-tertiary)">{h.confirmDetail}</p>
+            <p className="mt-2 truncate font-mono text-[0.7rem] text-(--ui-text-quaternary)" title={pending.identifier}>
+              {pending.identifier}
+            </p>
+            {pending.source && (
+              <p className="mt-0.5 text-[0.7rem] text-(--ui-text-quaternary)">{h.confirmSource(pending.source)}</p>
+            )}
+            {/* Server-resolved identity the user is actually authorizing. The
+                commit is the TRANSPORT-resolved 40-hex (or a warning when the
+                source is network/mutable); the digest is the whole-bundle hash
+                the server re-verifies on activate. */}
+            <div className="mt-3 space-y-1 rounded-md border border-(--ui-stroke-secondary) bg-(--ui-bg-primary) p-2">
+              {pending.commit ? (
+                <p className="truncate font-mono text-[0.7rem] text-(--ui-text-tertiary)" title={pending.commit}>
+                  <span className="text-(--ui-text-quaternary)">{h.confirmCommitLabel}: </span>
+                  {pending.commit}
+                </p>
+              ) : (
+                <p className="text-[0.7rem] text-(--ui-text-quaternary)">{h.confirmUnverifiedCommit}</p>
+              )}
+              <p
+                className="truncate font-mono text-[0.7rem] text-(--ui-text-tertiary)"
+                data-testid="hub-confirm-digest"
+                title={pending.digest}
+              >
+                <span className="text-(--ui-text-quaternary)">{h.confirmDigestLabel}: </span>
+                {pending.digest}
+              </p>
+            </div>
+            <div className="mt-3 flex justify-end gap-2">
+              <Button disabled={busy} onClick={cancelPending} size="xs" variant="text">
+                {h.confirmCancel}
+              </Button>
+              <Button disabled={busy} onClick={confirmPending} size="xs" variant="default">
+                {busy && <Loader2 className="size-3 animate-spin" />}
+                {h.confirmInstall}
+              </Button>
+            </div>
+          </div>
         </div>
       )}
     </section>

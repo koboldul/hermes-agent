@@ -48,6 +48,10 @@ install method for `hermes update`, and clones the full git project into
 development environment on the same layout the CLI, updater, lazy dependency
 installer, gateway, and docs assume.
 
+Install `uv` first (see the prerequisites table above) — the installer uses your
+operator-installed `uv` and won't auto-download it; it stops with the exact
+command if `uv`, Node.js, or Git is missing.
+
 ```bash
 curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
 cd "${HERMES_HOME:-$HOME/.hermes}/hermes-agent"

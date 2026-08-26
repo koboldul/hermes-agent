@@ -1,0 +1,984 @@
+{
+  "schema_version": 1,
+  "_doc": "Machine-readable closure ledger for Work Package 4. Every production download/execution/activation path that resolves a mutable executable, package graph, or remote extension is recorded here with a REAL gate and a behavioral negative test. scripts/ci/check_supply_chain.py fails CI when production code adds a high-signal mutable fetch whose file is not represented below. SECURE BY DEFAULT: automatic mutable executable routes are disabled (explicitly_disabled) unless the operator explicitly allows the specific component via config (security.supply_chain.allow_unverified_components: [\"<id>\"], or enforce: false), or passes --allow-unverified-bootstrap to a pre-config installer. Consent is SCOPED per component: allowing one never enables another. No entry may claim migrated/explicitly_disabled without a corresponding code gate.",
+  "paths": [
+    {
+      "id": "uv-bootstrap-managed",
+      "description": "hermes_cli.managed_uv prefers an operator-managed uv; else fails closed. The Astral installer runs only under scoped opt-in (component 'uv').",
+      "source": "hermes_cli/managed_uv.py",
+      "trust_owner": "transport_trusted",
+      "component": "uv",
+      "verifier": "hermes_cli.supply_chain.gate.guard_install",
+      "activation_point": "hermes_cli.managed_uv._ensure_uv_path / _install_uv",
+      "negative_test": "tests/supply_chain/test_uv_bootstrap.py",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "migration_state": "explicitly_disabled",
+      "mutable_fetch": true
+    },
+    {
+      "id": "uv-self-update",
+      "description": "hermes_cli/managed_uv.update_managed_uv: 'uv self update' network refresh skipped by default (compat_opt_in('uv')); the existing managed uv is preserved and the CVE runtime-repair probe still runs.",
+      "source": "hermes_cli/managed_uv.py",
+      "trust_owner": "transport_trusted",
+      "component": "uv",
+      "verifier": "hermes_cli.supply_chain.gate.compat_opt_in",
+      "activation_point": "hermes_cli.managed_uv.update_managed_uv",
+      "negative_test": "tests/supply_chain/test_uv_bootstrap.py::test_uv_self_update_skipped_by_default",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "migration_state": "explicitly_disabled",
+      "mutable_fetch": true
+    },
+    {
+      "id": "managed-node-heal-windows",
+      "description": "Node heal/bootstrap: mutable nodejs.org download disabled by default (compat_opt_in('node')); archive-member validation + digest verify before extraction when opted in. A6: EXECUTION requires a current provenance marker (node executable sha256, rechecked on every resolve); an unmarked legacy tree or a tampered one is ignored -> an operator-PATH Node is used in place, else fail closed. A verified heal/bootstrap writes the marker (archive digest + executable digest).",
+      "source": "hermes_constants.py",
+      "trust_owner": "transport_trusted",
+      "component": "node",
+      "verifier": "hermes_constants._managed_node_download_allowed + validate_archive_members; A6 execution gate hermes_constants._managed_node_marked / hermes_managed_node_tree_trusted (managed.managed_ok)",
+      "activation_point": "hermes_constants.find_hermes_node_executable / find_node_executable (marker gate); heal writes _write_managed_node_marker",
+      "negative_test": "tests/supply_chain/test_a6_node.py",
+      "platforms": [
+        "windows",
+        "linux",
+        "macos"
+      ],
+      "migration_state": "migrated",
+      "mutable_fetch": true
+    },
+    {
+      "id": "managed-python-provision",
+      "description": "managed_uv._attempt_install_generation downloads a python-build-standalone build via uv. Disabled by default (compat_opt_in('managed-python')); the old venv is preserved on skip.",
+      "source": "hermes_cli/managed_uv.py",
+      "trust_owner": "transport_trusted",
+      "component": null,
+      "verifier": "hermes_cli.supply_chain.gate.compat_opt_in",
+      "activation_point": "hermes_cli.managed_uv._attempt_install_generation",
+      "negative_test": "tests/supply_chain/test_binary_installer_gates.py",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "migration_state": "explicitly_disabled",
+      "mutable_fetch": false
+    },
+    {
+      "id": "setup-hermes-uv",
+      "description": "setup-hermes.sh uv install: astral installer disabled by default; requires --allow-unverified-bootstrap.",
+      "source": "setup-hermes.sh",
+      "trust_owner": "transport_trusted",
+      "component": "uv",
+      "activation_point": "setup-hermes.sh install_uv path",
+      "negative_test": "tests/supply_chain/test_shell_gate.py",
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "migration_state": "explicitly_disabled",
+      "mutable_fetch": true
+    },
+    {
+      "id": "setup-hermes-deps",
+      "description": "setup-hermes.sh: `uv sync --extra all --locked` (hash-verified) is authoritative; the unhashed pip re-resolve fallback and the Termux unconstrained fallback fail closed unless --allow-unverified-bootstrap.",
+      "source": "setup-hermes.sh",
+      "trust_owner": "transport_trusted",
+      "component": null,
+      "activation_point": "setup-hermes.sh dependency install",
+      "negative_test": "tests/supply_chain/test_shell_gate.py",
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "migration_state": "explicitly_disabled",
+      "mutable_fetch": false
+    },
+    {
+      "id": "install-sh-uv",
+      "description": "scripts/install.sh install_uv(): prefers operator-managed uv; astral installer runs only under --allow-unverified-bootstrap.",
+      "source": "scripts/install.sh",
+      "trust_owner": "transport_trusted",
+      "component": "uv",
+      "activation_point": "scripts/install.sh install_uv",
+      "negative_test": "tests/supply_chain/test_shell_gate.py",
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "migration_state": "explicitly_disabled",
+      "mutable_fetch": true
+    },
+    {
+      "id": "install-sh-node",
+      "description": "scripts/install.sh managed Node download: disabled by default; requires --allow-unverified-bootstrap.",
+      "source": "scripts/install.sh",
+      "trust_owner": "transport_trusted",
+      "component": "node",
+      "activation_point": "scripts/install.sh managed Node install",
+      "negative_test": "tests/supply_chain/test_shell_gate.py",
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "migration_state": "explicitly_disabled",
+      "mutable_fetch": true
+    },
+    {
+      "id": "install-sh-playwright",
+      "description": "scripts/install.sh run_playwright_install: Playwright Chromium browser payload disabled by default; requires --allow-unverified-bootstrap.",
+      "source": "scripts/install.sh",
+      "trust_owner": "transport_trusted",
+      "component": null,
+      "activation_point": "scripts/install.sh run_playwright_install",
+      "negative_test": "tests/supply_chain/test_shell_gate.py",
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "migration_state": "explicitly_disabled",
+      "mutable_fetch": false
+    },
+    {
+      "id": "install-ps1-uv",
+      "description": "scripts/install.ps1 Install-Uv: prefers operator-managed uv; astral/releases installer runs only under -AllowUnverifiedBootstrap.",
+      "source": "scripts/install.ps1",
+      "trust_owner": "transport_trusted",
+      "component": "uv",
+      "activation_point": "scripts/install.ps1 Install-Uv",
+      "negative_test": "tests/supply_chain/test_shell_gate.py",
+      "platforms": [
+        "windows"
+      ],
+      "migration_state": "explicitly_disabled",
+      "mutable_fetch": true
+    },
+    {
+      "id": "install-ps1-node-npm",
+      "description": "scripts/install.ps1 Node download + Update-ManagedNpm: disabled by default; require -AllowUnverifiedBootstrap.",
+      "source": "scripts/install.ps1",
+      "trust_owner": "transport_trusted",
+      "component": "node",
+      "activation_point": "scripts/install.ps1 Node / Update-ManagedNpm",
+      "negative_test": "tests/supply_chain/test_shell_gate.py",
+      "platforms": [
+        "windows"
+      ],
+      "migration_state": "explicitly_disabled",
+      "mutable_fetch": true
+    },
+    {
+      "id": "install-ps1-portablegit",
+      "description": "scripts/install.ps1 Install-Git: PortableGit download disabled by default (system Git preferred); requires -AllowUnverifiedBootstrap.",
+      "source": "scripts/install.ps1",
+      "trust_owner": "transport_trusted",
+      "component": null,
+      "activation_point": "scripts/install.ps1 Install-Git",
+      "negative_test": "tests/supply_chain/test_shell_gate.py",
+      "platforms": [
+        "windows"
+      ],
+      "migration_state": "explicitly_disabled",
+      "mutable_fetch": false
+    },
+    {
+      "id": "install-ps1-playwright",
+      "description": "scripts/install.ps1 Playwright Chromium download disabled by default; requires -AllowUnverifiedBootstrap.",
+      "source": "scripts/install.ps1",
+      "trust_owner": "transport_trusted",
+      "component": null,
+      "activation_point": "scripts/install.ps1 Playwright stage",
+      "negative_test": "tests/supply_chain/test_shell_gate.py",
+      "platforms": [
+        "windows"
+      ],
+      "migration_state": "explicitly_disabled",
+      "mutable_fetch": false
+    },
+    {
+      "id": "node-bootstrap-sh",
+      "description": "scripts/lib/node-bootstrap.sh managed Node: (download) mutable nodejs.org fetch in _nb_install_bundled_node disabled by default, gated on the internal bootstrap bridge (--allow-unverified-bootstrap or Hermes after reading config). (A1 execution) a Hermes-managed Node ($HERMES_HOME/node/bin/{node,npm,npx}, incl. a PATH/symlink alias into any managed root) is EXECUTED — even for --version — only when it carries a current provenance marker (binary sha256), verified BEFORE execution in _nb_have_modern_node, the explicit managed block, and _nb_managed_node_needs_heal; an unmarked/tampered tree is ignored so an operator/system Node is used in place or heal fails closed. A verified bundled install writes markers for node/npm/npx (matches install.sh + hermes_constants).",
+      "source": "scripts/lib/node-bootstrap.sh",
+      "trust_owner": "transport_trusted",
+      "component": "node",
+      "activation_point": "scripts/lib/node-bootstrap.sh _nb_install_bundled_node + ensure_node/_nb_have_modern_node marker gate",
+      "negative_test": "tests/supply_chain/test_node_bootstrap_marker.py",
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "migration_state": "explicitly_disabled",
+      "mutable_fetch": true
+    },
+    {
+      "id": "npm-engine-upgrade",
+      "description": "hermes_cli/npm_engine.upgrade_managed_npm: semver-range npm upgrade disabled by default (compat_opt_in('npm')); current npm preserved.",
+      "source": "hermes_cli/npm_engine.py",
+      "trust_owner": "transport_trusted",
+      "component": "node",
+      "verifier": "hermes_cli.supply_chain.gate.compat_opt_in",
+      "activation_point": "hermes_cli.npm_engine.upgrade_managed_npm",
+      "negative_test": "tests/supply_chain/test_installer_gates.py",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "migration_state": "explicitly_disabled",
+      "mutable_fetch": false
+    },
+    {
+      "id": "nixos-uv-node",
+      "description": "nix/nixosModules.nix first boot: mutable astral uv installer disabled by default via the services.hermes-agent.allowUnverifiedBootstrap module option (not an env var).",
+      "source": "nix/nixosModules.nix",
+      "trust_owner": "transport_trusted",
+      "component": "uv",
+      "activation_point": "nix/nixosModules.nix first-boot provisioning",
+      "negative_test": "tests/supply_chain/test_shell_gate.py",
+      "platforms": [
+        "linux"
+      ],
+      "migration_state": "explicitly_disabled",
+      "mutable_fetch": true
+    },
+    {
+      "id": "cua-driver-cli",
+      "description": "hermes_cli/tools_config._run_cua_driver_installer: trycua main-branch installer disabled by default (compat_opt_in('cua-driver')); compatible existing driver preserved.",
+      "source": "hermes_cli/tools_config.py",
+      "trust_owner": "transport_trusted",
+      "component": "cua-driver",
+      "verifier": "hermes_cli.supply_chain.gate.compat_opt_in",
+      "activation_point": "hermes_cli.tools_config._run_cua_driver_installer",
+      "negative_test": "tests/supply_chain/test_installer_gates.py",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "migration_state": "explicitly_disabled",
+      "mutable_fetch": true
+    },
+    {
+      "id": "cua-driver-repair",
+      "description": "tools/computer_use/cua_backend._maybe_repair_runtime_contract routes through the gated install_cua_driver chokepoint; repair fails closed to the prior contract.",
+      "source": "tools/computer_use/cua_backend.py",
+      "trust_owner": "transport_trusted",
+      "component": "cua-driver",
+      "verifier": "hermes_cli.supply_chain.gate.compat_opt_in",
+      "activation_point": "tools.computer_use.cua_backend._maybe_repair_runtime_contract",
+      "negative_test": "tests/supply_chain/test_installer_gates.py",
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "migration_state": "explicitly_disabled",
+      "mutable_fetch": true
+    },
+    {
+      "id": "cua-backend-help-strings",
+      "description": "tools/computer_use/cua_backend.py surfaces the upstream trycua one-liner in operator guidance strings (documentation, not executed).",
+      "source": "tools/computer_use/cua_backend.py",
+      "trust_owner": "transport_trusted",
+      "component": "cua-driver",
+      "activation_point": "tools.computer_use.cua_backend operator guidance strings",
+      "negative_test": "tests/supply_chain/test_ledger.py",
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "migration_state": "migrated",
+      "mutable_fetch": false
+    },
+    {
+      "id": "hermes-update-zip-fallback",
+      "description": "hermes_cli/update_cmd._update_via_zip: refs/heads/<branch>.zip source replacement disabled by default (compat_opt_in('hermes-source-zip')); git update remains the first-party trust boundary.",
+      "source": "hermes_cli/update_cmd.py",
+      "trust_owner": "first_party_git",
+      "component": null,
+      "verifier": "hermes_cli.supply_chain.gate.compat_opt_in",
+      "activation_point": "hermes_cli.update_cmd._update_via_zip",
+      "negative_test": "tests/supply_chain/test_installer_gates.py",
+      "platforms": [
+        "windows"
+      ],
+      "migration_state": "explicitly_disabled",
+      "mutable_fetch": true
+    },
+    {
+      "id": "tirith-auto-install",
+      "description": "tools/tirith_security._install_tirith: releases/latest auto-install disabled by default (compat_opt_in('tirith')); degrades to pattern-matching guards.",
+      "source": "tools/tirith_security.py",
+      "trust_owner": "transport_trusted",
+      "component": "tirith",
+      "verifier": "hermes_cli.supply_chain.gate.compat_opt_in + cosign(pinned identity)",
+      "activation_point": "tools.tirith_security._install_tirith",
+      "negative_test": "tests/supply_chain/test_installer_gates.py",
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "migration_state": "explicitly_disabled",
+      "mutable_fetch": true
+    },
+    {
+      "id": "lazy-deps-install",
+      "description": "tools/lazy_deps._allow_lazy_installs: automatic first-use lazy install of unpinned/unhashed PyPI packages disabled by default (compat_opt_in('lazy-deps')).",
+      "source": "tools/lazy_deps.py",
+      "trust_owner": "transport_trusted",
+      "component": null,
+      "verifier": "hermes_cli.supply_chain.gate.compat_opt_in",
+      "activation_point": "tools.lazy_deps._allow_lazy_installs",
+      "negative_test": "tests/supply_chain/test_installer_gates.py",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "migration_state": "explicitly_disabled",
+      "mutable_fetch": false
+    },
+    {
+      "id": "browser-use-payload",
+      "description": "tools/browser_use_cli.py: runtime uvx network resolution and uv-tool auto-install of browser-use disabled by default (compat_opt_in('browser-use')); launch requires an installed managed binary.",
+      "source": "tools/browser_use_cli.py",
+      "trust_owner": "transport_trusted",
+      "component": null,
+      "verifier": "hermes_cli.supply_chain.gate.compat_opt_in",
+      "activation_point": "tools.browser_use_cli._find_cli / install_cli",
+      "negative_test": "tests/supply_chain/test_installer_gates.py",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "migration_state": "explicitly_disabled",
+      "mutable_fetch": false
+    },
+    {
+      "id": "mcp-bootstrap",
+      "description": "hermes_cli/mcp_catalog._run_bootstrap: MCP bootstrap dependency install (unpinned/unhashed) disabled by default (compat_opt_in('mcp-bootstrap')).",
+      "source": "hermes_cli/mcp_catalog.py",
+      "trust_owner": "transport_trusted",
+      "component": null,
+      "verifier": "hermes_cli.supply_chain.gate.compat_opt_in",
+      "activation_point": "hermes_cli.mcp_catalog._run_bootstrap",
+      "negative_test": "tests/supply_chain/test_installer_gates.py",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "migration_state": "explicitly_disabled",
+      "mutable_fetch": false
+    },
+    {
+      "id": "profile-distribution-clone",
+      "description": "hermes_cli/profile_distribution._git_clone: honors url#<ref>; an exact #<40-char-sha> is a reviewed identity and is allowed (resolved commit persisted in provenance so updates re-pull the reviewed commit). A mutable/unpinned source fails closed unless compat_opt_in('profile-distribution').",
+      "source": "hermes_cli/profile_distribution.py",
+      "trust_owner": "transport_trusted",
+      "component": null,
+      "verifier": "hermes_cli.supply_chain.gate.compat_opt_in",
+      "activation_point": "hermes_cli.profile_distribution._git_clone / _stage_source",
+      "negative_test": "tests/supply_chain/test_extension_gates.py",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "migration_state": "migrated",
+      "mutable_fetch": false
+    },
+    {
+      "id": "skills-activation",
+      "description": "tools/skills_hub.install_from_quarantine: quarantine/discovery allowed; ACTIVATION into the live skills tree requires an exact resolved identity (commit SHA or pinned version) plus the whole-bundle sha256 recorded in provenance. Mutable/unpinned (official live-main, github @main) fails closed unless compat_opt_in('skills').",
+      "source": "tools/skills_hub.py",
+      "trust_owner": "transport_trusted",
+      "component": null,
+      "verifier": "tools.skills_hub.bundle_exact_identity + _whole_bundle_digest + compat_opt_in",
+      "activation_point": "tools.skills_hub.install_from_quarantine",
+      "negative_test": "tests/supply_chain/test_extension_gates.py",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "migration_state": "explicitly_disabled",
+      "mutable_fetch": false
+    },
+    {
+      "id": "plugins-cli-install",
+      "description": "hermes_cli/plugins_cmd.py: installing/updating a remote plugin from a mutable git HEAD (no requested revision) fails closed unless compat_opt_in('plugins'); a pinned exact revision is honored and recorded (installed_revision).",
+      "source": "hermes_cli/plugins_cmd.py",
+      "trust_owner": "transport_trusted",
+      "component": null,
+      "verifier": "hermes_cli.supply_chain.gate.compat_opt_in",
+      "activation_point": "hermes_cli.plugins_cmd install/update clone flow",
+      "negative_test": "tests/supply_chain/test_extension_gates.py",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "migration_state": "explicitly_disabled",
+      "mutable_fetch": false
+    },
+    {
+      "id": "desktop-plugin-install",
+      "description": "apps/desktop/electron/desktop-plugin-install.installDesktopPluginFromGit: remote-code activation disabled by default. Reads the canonical backend config (security.supply_chain.allow_unverified_components) scoped to 'plugins'; no env-var UI. Fails closed on any read/parse doubt.",
+      "source": "apps/desktop/electron/desktop-plugin-install.ts",
+      "trust_owner": "transport_trusted",
+      "component": null,
+      "verifier": "desktop-plugin-install.supplyChainAllowsUnverified",
+      "activation_point": "installDesktopPluginFromGit",
+      "negative_test": "apps/desktop/electron/desktop-plugin-install.supplychain.test.ts",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "migration_state": "explicitly_disabled",
+      "mutable_fetch": false
+    },
+    {
+      "id": "iron-proxy-install",
+      "description": "agent/proxy_sources/iron_proxy.install_iron_proxy: same-channel-checksum binary download disabled by default (compat_opt_in('iron-proxy')); an operator-managed binary is used in place.",
+      "source": "agent/proxy_sources/iron_proxy.py",
+      "trust_owner": "transport_trusted",
+      "component": null,
+      "verifier": "hermes_cli.supply_chain.gate.compat_opt_in",
+      "activation_point": "agent.proxy_sources.iron_proxy.install_iron_proxy",
+      "negative_test": "tests/supply_chain/test_binary_installer_gates.py",
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "migration_state": "explicitly_disabled",
+      "mutable_fetch": false
+    },
+    {
+      "id": "bws-install",
+      "description": "agent/secret_sources/bitwarden.install_bws: same-channel-checksum binary download disabled by default (compat_opt_in('bws')); an operator-managed bws is used in place.",
+      "source": "agent/secret_sources/bitwarden.py",
+      "trust_owner": "transport_trusted",
+      "component": null,
+      "verifier": "hermes_cli.supply_chain.gate.compat_opt_in",
+      "activation_point": "agent.secret_sources.bitwarden.install_bws",
+      "negative_test": "tests/supply_chain/test_binary_installer_gates.py",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "migration_state": "explicitly_disabled",
+      "mutable_fetch": false
+    },
+    {
+      "id": "android-psutil-install",
+      "description": "scripts/install_psutil_android.py: downloads and builds an unpinned psutil sdist (executes the build backend). Disabled by default (compat_opt_in('android-psutil')).",
+      "source": "scripts/install_psutil_android.py",
+      "trust_owner": "transport_trusted",
+      "component": null,
+      "verifier": "hermes_cli.supply_chain.gate.compat_opt_in",
+      "activation_point": "scripts.install_psutil_android.main",
+      "negative_test": "tests/supply_chain/test_binary_installer_gates.py",
+      "platforms": [
+        "linux"
+      ],
+      "migration_state": "explicitly_disabled",
+      "mutable_fetch": false
+    },
+    {
+      "id": "docker-base-images",
+      "description": "Dockerfile: every base image (debian build+runtime, uv_source, node_source) is pinned by @sha256 digest.",
+      "source": "Dockerfile",
+      "trust_owner": "release_verified",
+      "component": null,
+      "activation_point": "Dockerfile FROM stages",
+      "negative_test": "tests/supply_chain/test_installer_gates.py",
+      "platforms": [
+        "linux"
+      ],
+      "migration_state": "migrated",
+      "mutable_fetch": false
+    },
+    {
+      "id": "docker-browser-payload",
+      "description": "Dockerfile: the Playwright Chromium download is an unverified browser payload with no manifest identity. The build FAILS CLOSED by default; --build-arg ALLOW_UNVERIFIED_BROWSER=1 is an explicit acknowledgment. docker.yml emits an SBOM + max-mode provenance attestation and records the apt package closure.",
+      "source": "Dockerfile",
+      "trust_owner": "transport_trusted",
+      "component": null,
+      "activation_point": "Dockerfile npx playwright install (ALLOW_UNVERIFIED_BROWSER gate)",
+      "negative_test": "tests/supply_chain/test_binary_installer_gates.py",
+      "platforms": [
+        "linux"
+      ],
+      "migration_state": "explicitly_disabled",
+      "mutable_fetch": false
+    },
+    {
+      "id": "shell-supply-chain-gate",
+      "description": "scripts/lib/supply-chain-gate.sh: the shared shell gate (sc_opt_in / sc_gate_install) reading the internal bootstrap bridge (set by the --allow-unverified-bootstrap flag), used by the shell installers.",
+      "source": "scripts/lib/supply-chain-gate.sh",
+      "trust_owner": "transport_trusted",
+      "component": null,
+      "activation_point": "scripts/lib/supply-chain-gate.sh",
+      "negative_test": "tests/supply_chain/test_shell_gate.py",
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "migration_state": "migrated",
+      "mutable_fetch": false
+    },
+    {
+      "id": "model-catalog-metadata",
+      "description": "hermes_cli/model_catalog.py fetches the model catalog JSON from the mutable main branch. NON-EXECUTABLE metadata quarantine (data-only; never executed).",
+      "source": "hermes_cli/model_catalog.py",
+      "trust_owner": "transport_trusted",
+      "component": null,
+      "activation_point": "hermes_cli.model_catalog remote refresh",
+      "negative_test": "tests/supply_chain/test_ledger.py",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "migration_state": "migrated",
+      "mutable_fetch": true
+    },
+    {
+      "id": "plugin-index-metadata",
+      "description": "hermes_cli/plugin_index.py fetches the plugin index JSON from the mutable main branch. NON-EXECUTABLE discovery metadata only. Plugin ACTIVATION is gated separately (see plugins-cli-install / desktop-plugin-install), not by this metadata fetch.",
+      "source": "hermes_cli/plugin_index.py",
+      "trust_owner": "transport_trusted",
+      "component": null,
+      "activation_point": "hermes_cli.plugin_index remote fetch",
+      "negative_test": "tests/supply_chain/test_ledger.py",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "migration_state": "migrated",
+      "mutable_fetch": true
+    },
+    {
+      "id": "hindsight-plugin-templates",
+      "description": "plugins/memory/hindsight/templates.py references the upstream hindsight main-branch raw path for template metadata. NON-EXECUTABLE template source.",
+      "source": "plugins/memory/hindsight/templates.py",
+      "trust_owner": "transport_trusted",
+      "component": null,
+      "activation_point": "plugins.memory.hindsight.templates base URL",
+      "negative_test": "tests/supply_chain/test_ledger.py",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "migration_state": "migrated",
+      "mutable_fetch": false
+    },
+    {
+      "id": "install-cmd-doc-oneliner",
+      "description": "scripts/install.cmd header documents the curl-from-main bootstrap one-liner (comment, not executed).",
+      "source": "scripts/install.cmd",
+      "trust_owner": "transport_trusted",
+      "component": null,
+      "activation_point": "scripts/install.cmd header comment",
+      "negative_test": "tests/supply_chain/test_ledger.py",
+      "platforms": [
+        "windows"
+      ],
+      "migration_state": "migrated",
+      "mutable_fetch": false
+    },
+    {
+      "id": "browser-chromium-autoinstall",
+      "description": "tools/browser_tool._maybe_autoinstall_chromium: automatic ~170MB Chromium/agent-browser binary download disabled by default via _allow_lazy_installs (compat_opt_in('lazy-deps')); operator installs the browser or opts in scoped. A6 note: Hermes keeps NO managed browser-binary store — Chromium/headless-shell resolve from Playwright's shared cache (~/.cache/ms-playwright, %LOCALAPPDATA%\\ms-playwright), operator PATH (system chrome, AGENT_BROWSER_EXECUTABLE_PATH), or lock-anchored node_modules (agent-browser, @askjo/camofox). These are operator/shared 'used in place', never relabelled release-verified; the Node that drives the browser toolchain is itself marker-gated (managed-node-heal-windows).",
+      "source": "tools/browser_tool.py",
+      "trust_owner": "transport_trusted",
+      "component": null,
+      "verifier": "hermes_cli.supply_chain.gate.compat_opt_in",
+      "activation_point": "tools.browser_tool._maybe_autoinstall_chromium",
+      "negative_test": "tests/supply_chain/test_binary_installer_gates.py",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "migration_state": "explicitly_disabled",
+      "mutable_fetch": true
+    },
+    {
+      "id": "feature-pip-install",
+      "description": "hermes_cli/tools_config._pip_install: shared chokepoint for optional feature / memory-provider / setup-hook PyPI installs (neutts, faster-whisper, piper-tts, ddgs, langfuse, modal, daytona, qrcode, provider deps). Unpinned/unhashed installs disabled by default via compat_opt_in('feature-pip'); returns a clean non-zero result.",
+      "source": "hermes_cli/tools_config.py",
+      "trust_owner": "transport_trusted",
+      "component": null,
+      "verifier": "hermes_cli.supply_chain.gate.compat_opt_in",
+      "activation_point": "hermes_cli.tools_config._pip_install",
+      "negative_test": "tests/supply_chain/test_binary_installer_gates.py",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "migration_state": "explicitly_disabled",
+      "mutable_fetch": true
+    },
+    {
+      "id": "android-psutil-update-compat",
+      "description": "hermes_cli/update_cmd._install_psutil_android_compat: Termux psutil sdist download+build during 'hermes update' fails closed by default (compat_opt_in('android-psutil')); operator installs psutil via pkg.",
+      "source": "hermes_cli/update_cmd.py",
+      "trust_owner": "transport_trusted",
+      "component": null,
+      "verifier": "hermes_cli.supply_chain.gate.compat_opt_in",
+      "activation_point": "hermes_cli.update_cmd._install_psutil_android_compat",
+      "negative_test": "tests/supply_chain/test_binary_installer_gates.py::test_android_psutil_update_compat_fails_closed",
+      "platforms": [
+        "linux"
+      ],
+      "migration_state": "explicitly_disabled",
+      "mutable_fetch": true
+    },
+    {
+      "id": "termux-uv-pip-fallback",
+      "description": "hermes_cli/update_cmd._ensure_uv_for_termux: 'pip install uv' wheel fallback on Termux skipped by default (compat_opt_in('uv')); an operator uv on PATH is used in place first.",
+      "source": "hermes_cli/update_cmd.py",
+      "trust_owner": "transport_trusted",
+      "component": "uv",
+      "verifier": "hermes_cli.supply_chain.gate.compat_opt_in",
+      "activation_point": "hermes_cli.update_cmd._ensure_uv_for_termux",
+      "negative_test": "tests/supply_chain/test_binary_installer_gates.py::test_termux_uv_pip_fallback_skipped_by_default",
+      "platforms": [
+        "linux"
+      ],
+      "migration_state": "explicitly_disabled",
+      "mutable_fetch": true
+    },
+    {
+      "id": "wake-word-model",
+      "description": "tools/wake_word._ensure_sherpa_model: one-time sherpa KWS model archive download+extract fails closed by default (compat_opt_in('wake-word-model')); an already-present cached model is used in place.",
+      "source": "tools/wake_word.py",
+      "trust_owner": "transport_trusted",
+      "component": null,
+      "verifier": "hermes_cli.supply_chain.gate.compat_opt_in",
+      "activation_point": "tools.wake_word._ensure_sherpa_model",
+      "negative_test": "tests/supply_chain/test_binary_installer_gates.py::test_wake_word_model_download_fails_closed",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "migration_state": "explicitly_disabled",
+      "mutable_fetch": true
+    },
+    {
+      "id": "electron-native-staging",
+      "description": "apps/desktop/scripts/stage-native-deps.mjs: stages node-pty/get-windows native binaries. Only lock-bound bundled prebuilds are staged; the network native rebuild (electron-rebuild) fails closed by default via nativePrebuildDecision unless the operator opts in (electron-native).",
+      "source": "apps/desktop/scripts/stage-native-deps.mjs",
+      "trust_owner": "transport_trusted",
+      "component": "electron",
+      "verifier": "apps/desktop/scripts/native-payload-verifier.nativePrebuildDecision",
+      "activation_point": "stageNodePtyInto",
+      "negative_test": "apps/desktop/scripts/native-payload-verifier.test.mjs",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "migration_state": "explicitly_disabled",
+      "mutable_fetch": true
+    },
+    {
+      "id": "electron-native-rebuild",
+      "description": "apps/desktop/scripts/rebuild-native.mjs: @electron/rebuild downloads electron headers and builds node-pty from source. Disabled by default (nativeRebuildOptIn); runs only with explicit operator opt-in.",
+      "source": "apps/desktop/scripts/rebuild-native.mjs",
+      "trust_owner": "transport_trusted",
+      "component": "electron",
+      "verifier": "apps/desktop/scripts/native-payload-verifier.supplyChainAllowsUnverified",
+      "activation_point": "rebuildNodePty",
+      "negative_test": "apps/desktop/scripts/native-payload-verifier.test.mjs",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "migration_state": "explicitly_disabled",
+      "mutable_fetch": true
+    },
+    {
+      "id": "electron-builder-fetch",
+      "description": "apps/desktop/scripts/run-electron-builder.mjs: electron-builder fetches the electron binary via @electron/get. runNativePayloadGate (verify-native-payloads.mjs) verifies the package-bundled checksums.json against the COMMITTED manifest sha256 for the exact target before any fetch; the electron component is release_verified (per-target sha256 committed). Fails closed on mismatch. A6 (final): the swap of the verified tree into the electron-builder-consumed dist goes through the SHARED PYTHON kernel-locked publication transaction — run-electron-builder.mjs extracts to a sibling stage OUTSIDE the target, then apps/desktop/scripts/python-publish.mjs::publishThroughPythonTransaction spawns `python -m hermes_cli.supply_chain.publish_cli` (--component --target --staged-dir --staged-sha256 ...). That CLI runs publish_release_verified: acquire the kernel advisory lock (fcntl/msvcrt), reload anti-rollback state, re-verify the compiled trust root, recheck the electron high-water (sequence + version floor), verify the archive sha256 vs the committed manifest, atomically swap the stage into place WITH rollback (the prior verified dist is preserved on any failure), and commit the high-water AFTER the publish (a state-write failure rolls the publish back). One transaction authority (Python) across the JS surfaces; no JS lock. Replaces the old rm(dest)+extract-in-place.",
+      "source": "apps/desktop/scripts/run-electron-builder.mjs",
+      "trust_owner": "release_verified",
+      "component": "electron",
+      "verifier": "apps/desktop/scripts/verify-native-payloads",
+      "activation_point": "runNativePayloadGate",
+      "negative_test": "apps/desktop/scripts/native-payload-verifier.test.mjs",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "migration_state": "migrated",
+      "mutable_fetch": true
+    },
+    {
+      "id": "nix-desktop-electron-headers",
+      "description": "nix/desktop.nix: fetches electron headers (artifacts.electronjs.org) for the nix desktop build. Nix pins an exact sha256 in-derivation and verifies it \u2014 digest-anchored like the docker base images.",
+      "source": "nix/desktop.nix",
+      "trust_owner": "release_verified",
+      "component": null,
+      "verifier": "nix fixed-output derivation sha256",
+      "activation_point": "nix build",
+      "negative_test": "tests/supply_chain/test_native_payloads.py::test_nix_files_pin_sha256",
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "migration_state": "migrated",
+      "mutable_fetch": true
+    },
+    {
+      "id": "nix-npm-tarball",
+      "description": "nix/npm-12-0-2.nix: fetches the npm tarball (registry.npmjs.org). Nix pins an exact sha256 in-derivation and verifies it.",
+      "source": "nix/npm-12-0-2.nix",
+      "trust_owner": "release_verified",
+      "component": null,
+      "verifier": "nix fixed-output derivation sha256",
+      "activation_point": "nix build",
+      "negative_test": "tests/supply_chain/test_native_payloads.py::test_nix_files_pin_sha256",
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "migration_state": "migrated",
+      "mutable_fetch": true
+    },
+    {
+      "id": "electron-dist-verifier",
+      "description": "apps/desktop/scripts/electron-dist-verifier.mjs: byte-verifies the exact Electron archive @electron/get already downloaded + checksum-verified into its cache. Re-hashes the bytes against the COMMITTED supply-chain manifest digest for the target platform/arch, validates the ZIP members, extracts to a private verified tree, verifies the electron binary, and writes a provenance marker. It never fetches Electron itself (the @electron/get reference is the cache it reads).",
+      "source": "apps/desktop/scripts/electron-dist-verifier.mjs",
+      "trust_owner": "release_verified",
+      "component": "electron",
+      "verifier": "sha256 re-hash of cache bytes vs committed manifest digest + electron-zip member validation + provenance marker",
+      "activation_point": "apps/desktop/scripts/electron-dist-verifier.mjs verifyArchiveBytes / verifyElectronDist",
+      "negative_test": "apps/desktop/scripts/electron-dist-verifier.test.mjs",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "migration_state": "migrated",
+      "mutable_fetch": false
+    },
+    {
+      "id": "electron-zip-reader",
+      "description": "apps/desktop/scripts/electron-zip.mjs: hardened ZIP central-directory reader used by the Electron byte-verifier. Rejects zip64, unsupported compression, symlink members, and traversal/unsafe paths before extraction. First-party parser — no network, no execution, no digest-anchored artifact of its own.",
+      "source": "apps/desktop/scripts/electron-zip.mjs",
+      "trust_owner": "first_party_git",
+      "component": null,
+      "verifier": "central-directory parse + symlink/traversal member rejection (feeds electron-dist-verifier)",
+      "activation_point": "apps/desktop/scripts/electron-zip.mjs readCentralDirectory / extractMember",
+      "negative_test": "apps/desktop/scripts/electron-zip.test.mjs",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "migration_state": "first_party_git",
+      "mutable_fetch": false
+    },
+    {
+      "id": "desktop-release-gate",
+      "description": "apps/desktop/scripts/release-gate.mjs: production packaging gate. A production/publish Desktop build (--publish not never/false, release tag, or explicit env) is REFUSED unless it ships an attested install stamp — a full 40-char commit SHA from a clean tree (not the all-zero placeholder). Enforces the pinned installer identity independent of whether CI set the flag.",
+      "source": "apps/desktop/scripts/release-gate.mjs",
+      "trust_owner": "first_party_git",
+      "component": null,
+      "verifier": "stampRejectionReason (full 40-char commit + clean tree) via enforceProductionStamp",
+      "activation_point": "apps/desktop/scripts/release-gate.mjs enforceProductionStamp",
+      "negative_test": "apps/desktop/scripts/release-gate.test.mjs",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "migration_state": "first_party_git",
+      "mutable_fetch": false
+    },
+    {
+      "id": "bootstrap-install-script",
+      "description": "apps/bootstrap-installer/src-tauri/src/install_script.rs: downloads scripts/install.ps1|sh from GitHub raw at a resolved ref and verifies the cached script before running it. In attested mode (HERMES_SETUP_REQUIRE_ATTESTED=1) resolve_pin_source REQUIRES a full 40-char commit SHA — a branch ref, short SHA, or no pin is rejected, and there is NO branch raw-script fallback. First-party install scripts pinned to an exact tested commit.",
+      "source": "apps/bootstrap-installer/src-tauri/src/install_script.rs",
+      "trust_owner": "first_party_git",
+      "component": null,
+      "verifier": "resolve_pin_source (attested -> full 40-char SHA only, no mutable fallback) + verify_cached_script",
+      "activation_point": "apps/bootstrap-installer/src-tauri/src/install_script.rs resolve_pin_source / download / verify_cached_script",
+      "negative_test": "apps/bootstrap-installer/src-tauri/src/install_script.rs",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "migration_state": "first_party_git",
+      "mutable_fetch": true
+    },
+    {
+      "id": "desktop-bootstrap-runner",
+      "description": "apps/desktop/electron/bootstrap-runner.ts: the Electron-side bootstrap that fetches scripts/install.{ps1,sh} from GitHub raw at a resolved ref. isPinnedCommit requires a 7-40 hex commit and rejects the all-zero fallback stamp, so the desktop bootstrap runs first-party install scripts at a pinned commit identity.",
+      "source": "apps/desktop/electron/bootstrap-runner.ts",
+      "trust_owner": "first_party_git",
+      "component": null,
+      "verifier": "isPinnedCommit (7-40 hex, rejects all-zero fallback) on the resolved ref",
+      "activation_point": "apps/desktop/electron/bootstrap-runner.ts (install-script fetch)",
+      "negative_test": "apps/desktop/electron/bootstrap-runner.test.ts",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "migration_state": "first_party_git",
+      "mutable_fetch": true
+    },
+    {
+      "id": "skills-hub-propose-activate",
+      "description": "hermes_cli/skill_proposal.py: two-step propose -> activate hub-skill install (A4 Skills XPIA). Propose fetches the bundle, scans + quarantines it, and computes the TRANSPORT-RESOLVED commit (skills_hub.bundle_exact_identity) + the deterministic whole-bundle digest (skills_hub._whole_bundle_digest). Activate must carry the exact commit+digest the user confirmed and routes to skills_hub.install_from_quarantine(activation_accepted=True, expected_bundle_digest=...); on-disk mutation between propose and activate fails the digest recheck.",
+      "source": "hermes_cli/skill_proposal.py",
+      "trust_owner": "first_party_git",
+      "component": null,
+      "verifier": "skills_hub.bundle_exact_identity + _whole_bundle_digest + install_from_quarantine(activation_accepted, expected_bundle_digest)",
+      "activation_point": "hermes_cli/skill_proposal.py activate_proposal",
+      "negative_test": "tests/hermes_cli/test_skill_proposal.py",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "migration_state": "migrated",
+      "mutable_fetch": false
+    },
+    {
+      "id": "skills-web-endpoints",
+      "description": "hermes_cli/web_routers/skills.py: HTTP endpoints for hub skill propose/activate/install. The install endpoint spawns the `hermes skills install <id> --yes` CLI, and propose/activate route through the commit+digest activation gate (skill_proposal / skills_hub). No skill bytes are activated except through that gate.",
+      "source": "hermes_cli/web_routers/skills.py",
+      "trust_owner": "first_party_git",
+      "component": null,
+      "verifier": "delegates to skill_proposal.activate_proposal / skills install CLI (commit+digest activation gate)",
+      "activation_point": "hermes_cli/web_routers/skills.py hub_router propose/activate/install",
+      "negative_test": "tests/hermes_cli/test_skills_hub_propose_activate.py",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "migration_state": "migrated",
+      "mutable_fetch": false
+    },
+    {
+      "id": "docker-npm-lifecycle",
+      "description": "Dockerfile npm install/ci (root workspace + photon iMessage sidecar): A4 audited lifecycle. Installed with --ignore-scripts (npm 10 ignores package.json allowScripts, so scripts are blocked at install time regardless of npm major); the reviewed allowlisted lifecycle then runs -- root via node apps/desktop/scripts/run-allowed-lifecycle.mjs (npm rebuild of lock-version-matched allowlisted packages; get-windows is on NEVER_RUN and never rebuilt), photon sidecar via its explicit first-party spectrum-ts patch. Packages are integrity-pinned by the committed package-lock.json; the orchestrator is COPYed before the root install.",
+      "source": "Dockerfile",
+      "trust_owner": "first_party_git",
+      "component": null,
+      "verifier": "apps/desktop/scripts/run-allowed-lifecycle.mjs (rebuildDecision: allowlisted + lock-version-matched, get-windows NEVER_RUN); --ignore-scripts at every npm install/ci; committed package-lock.json integrity",
+      "activation_point": "Dockerfile RUN npm install --ignore-scripts && node run-allowed-lifecycle.mjs; sidecar RUN npm ci --ignore-scripts && node patch-spectrum-mixed-attachments.mjs",
+      "negative_test": "tests/supply_chain/test_a4_npm_lifecycle.py",
+      "platforms": [
+        "linux"
+      ],
+      "migration_state": "migrated",
+      "mutable_fetch": false
+    },
+    {
+      "id": "cli-frontend-npm-build",
+      "description": "hermes_cli frontend dependency installs (hermes setup / hermes update web-UI, TUI, desktop workspace builds; Camofox browser-server install): A4 audited lifecycle. _run_npm_install_deterministic runs npm ci/install with --ignore-scripts, then _run_allowed_lifecycle invokes the audited orchestrator (node-pty/esbuild/electron rebuild; get-windows never); the Camofox install (tools_config) uses --ignore-scripts (engine fetched separately at runtime). No dependency runs arbitrary install-time code.",
+      "source": "hermes_cli/main.py",
+      "trust_owner": "first_party_git",
+      "component": null,
+      "verifier": "hermes_cli.main._run_allowed_lifecycle (audited orchestrator) + --ignore-scripts on every npm ci/install; committed package-lock.json integrity",
+      "activation_point": "hermes_cli/main.py _run_npm_install_deterministic + _run_allowed_lifecycle; hermes_cli/tools_config.py camofox install",
+      "negative_test": "tests/supply_chain/test_a4_npm_lifecycle.py",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "migration_state": "migrated",
+      "mutable_fetch": false
+    },
+    {
+      "id": "photon-sidecar-npm",
+      "description": "Photon iMessage sidecar dependency install (hermes photon setup / install-sidecar / gateway self-heal / dashboard setup): A4 audited lifecycle. npm ci --ignore-scripts (fallback npm install --ignore-scripts) against the committed sidecar package-lock.json, then ONLY the reviewed first-party spectrum-ts postinstall patch runs explicitly (sidecar_paths.run_sidecar_patch). No third-party dependency install hook executes.",
+      "source": "plugins/platforms/photon/sidecar_paths.py",
+      "trust_owner": "first_party_git",
+      "component": null,
+      "verifier": "plugins/platforms/photon/sidecar_paths.run_sidecar_patch (explicit reviewed first-party lifecycle) + --ignore-scripts on every npm ci/install; committed package-lock.json integrity",
+      "activation_point": "plugins/platforms/photon/adapter._reinstall_sidecar_deps + cli._install_sidecar",
+      "negative_test": "tests/supply_chain/test_a4_npm_lifecycle.py",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "migration_state": "migrated",
+      "mutable_fetch": false
+    },
+    {
+      "id": "whatsapp-bridge-npm",
+      "description": "WhatsApp Baileys bridge dependency install (gateway runtime first-connect; hermes whatsapp setup CLI; dashboard setup surface): A4 audited lifecycle. npm install --ignore-scripts against the committed scripts/whatsapp-bridge/package-lock.json. The bridge is a first-party package with no first-party install script and only pure-JS runtime deps (baileys/express/pino/qrcode-terminal), so nothing needs a post-install rebuild; --ignore-scripts is the complete guarantee no dependency runs arbitrary install-time code.",
+      "source": "plugins/platforms/whatsapp/adapter.py",
+      "trust_owner": "first_party_git",
+      "component": null,
+      "verifier": "--ignore-scripts on every bridge npm install (adapter.py, hermes_cli/main.py, hermes_cli/web_server.py); committed package-lock.json integrity",
+      "activation_point": "plugins/platforms/whatsapp/adapter bridge dependency install; hermes_cli/main.py whatsapp setup; hermes_cli/web_server._ensure_whatsapp_bridge_dependencies",
+      "negative_test": "tests/supply_chain/test_a4_npm_lifecycle.py",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "migration_state": "migrated",
+      "mutable_fetch": false
+    },
+    {
+      "id": "nix-npm-lifecycle",
+      "description": "nix/lib.nix npm lockfile-regen (update-npm-lockfile) and devshell hook (npm ci): A4 audited lifecycle. Both run --ignore-scripts; the devshell hook additionally runs the audited orchestrator (node apps/desktop/scripts/run-allowed-lifecycle.mjs). The authoritative Nix package builds (.#tui/.#web/.#desktop) resolve via importNpmLock (content-addressed, hash-verified), a stronger anchor than --ignore-scripts.",
+      "source": "nix/lib.nix",
+      "trust_owner": "first_party_git",
+      "component": null,
+      "verifier": "--ignore-scripts on npm install/ci; apps/desktop/scripts/run-allowed-lifecycle.mjs on the devshell hook; importNpmLock content-addressing on the real package builds",
+      "activation_point": "nix/lib.nix updateLockfile script + mkNpmDevShellHook",
+      "negative_test": "tests/supply_chain/test_a4_npm_lifecycle.py",
+      "platforms": [
+        "linux",
+        "macos"
+      ],
+      "migration_state": "migrated",
+      "mutable_fetch": false
+    },
+    {
+      "id": "npm-ci-bootstrap-pinned",
+      "description": "CI npm bootstrap (scripts/ci/install-npm-pinned.mjs): replaces the workflow `npm i -g npm@12.0.2` (version-exact but registry-metadata-trusting). Downloads the EXACT canonical tarball URL, follows only bounded redirects to canonical_hosts (https required off-loopback), verifies sha256 over the downloaded bytes BEFORE any install, then installs the LOCAL verified tarball with `npm -g --ignore-scripts --offline` (no registry resolution, no lifecycle scripts) and cleans up temp. Identity (version/url/sha256/hosts) is supply-chain/npm-bootstrap.json, validated against nix/npm-12-0-2.nix (its sha256-<base64> SRI decodes to the same hex) -- one source of truth.",
+      "source": "scripts/ci/install-npm-pinned.mjs",
+      "trust_owner": "first_party_git",
+      "component": null,
+      "verifier": "install-npm-pinned.downloadVerified (approved-host + https-off-loopback redirect gate; sha256 over bytes before install) against supply-chain/npm-bootstrap.json (digest validated against nix/npm-12-0-2.nix); install is `npm -g --ignore-scripts --offline <local tarball>`",
+      "activation_point": "scripts/ci/install-npm-pinned.mjs run() (workflow `grab npm 12` steps)",
+      "negative_test": "tests/supply_chain/test_npm_bootstrap.py",
+      "platforms": [
+        "linux",
+        "macos",
+        "windows"
+      ],
+      "migration_state": "migrated",
+      "mutable_fetch": true
+    }
+  ]
+}

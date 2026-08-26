@@ -446,11 +446,27 @@ def find_iron_proxy(*, install_if_missing: bool = False) -> Optional[Path]:
 
     managed = _hermes_bin_dir() / _platform_binary_name()
     if managed.exists() and os.access(managed, os.X_OK):
-        return managed
+        # A6: managed iron-proxy is trusted only with a current provenance
+        # marker; an unmarked/tampered binary is ignored for an operator PATH one.
+        try:
+            from hermes_cli.supply_chain.managed import managed_ok
+
+            _marked = managed_ok(managed, component="iron-proxy")
+        except Exception:
+            _marked = False
+        if _marked:
+            return managed
+        logger.info("managed iron-proxy at %s has no current provenance marker; ignoring it (A6)", managed)
 
     system = shutil.which("iron-proxy")
     if system:
-        return Path(system)
+        # A6 alias-bypass: reject a PATH/symlink/junction/case alias to the
+        # (unmarked) managed iron-proxy; accept a genuine operator binary.
+        from hermes_cli.supply_chain.managed import accept_operator_path
+
+        accepted = accept_operator_path(system, component="iron-proxy")
+        if accepted:
+            return Path(accepted)
 
     if install_if_missing:
         try:
@@ -475,7 +491,36 @@ def install_iron_proxy(*, force: bool = False) -> Path:
     target = bin_dir / _platform_binary_name()
 
     if target.exists() and not force:
-        return target
+        # A6: return an existing managed iron-proxy ONLY with a current
+        # provenance marker. An unmarked/tampered legacy binary is quarantined
+        # here — before any installer fallback — so it is never returned or
+        # executed on existence alone; resolution proceeds to the gated install.
+        from hermes_cli.supply_chain.managed import managed_ok, quarantine_unmarked
+
+        if managed_ok(target, component="iron-proxy"):
+            return target
+        quarantine_unmarked(target, component="iron-proxy")
+
+    # Supply-chain gate (WP4): iron-proxy is downloaded from a release channel
+    # whose checksum arrives over the same channel (transport-trusted, not
+    # release-verified — no committed digest). Disabled by default; the operator
+    # allows it in config: security.supply_chain.allow_unverified_components:
+    # ["iron-proxy"]. An existing operator-managed binary is used in place.
+    try:
+        from hermes_cli.supply_chain.gate import compat_opt_in
+
+        _ip_ok = compat_opt_in("iron-proxy")
+    except Exception:
+        _ip_ok = False
+    if not _ip_ok:
+        raise RuntimeError(
+            "iron-proxy auto-install is disabled by default (supply-chain "
+            "enforce): its checksum is fetched over the same channel as the "
+            "binary. Install it manually (https://github.com/ironsh/iron-proxy/"
+            "releases) and place it on PATH, or allow it in config: "
+            "security.supply_chain.allow_unverified_components: [\"iron-proxy\"]. "
+            "See docs/security/supply-chain-migration.md."
+        )
 
     asset_name = _platform_asset_name()
     asset_url = f"{_IRON_PROXY_RELEASE_BASE}/{asset_name}"
@@ -541,6 +586,16 @@ def install_iron_proxy(*, force: bool = False) -> Path:
     # of returning the pre-upgrade string.  Long-lived processes that
     # bump the pinned version via ``force=True`` need this.
     _VERSION_CACHE.pop(str(target), None)
+
+    # A6: record a provenance marker so this managed iron-proxy is trusted on
+    # the next resolve (an unmarked legacy binary is ignored).
+    try:
+        from hermes_cli.supply_chain.managed import write_marker
+
+        write_marker(target, component="iron-proxy", version=_IRON_PROXY_VERSION,
+                     provenance="operator_compat_opt_in")
+    except Exception as exc:  # pragma: no cover - marker best-effort
+        logger.warning("could not write iron-proxy provenance marker: %s", exc)
 
     logger.info("Installed iron-proxy %s at %s", _IRON_PROXY_VERSION, target)
     return target

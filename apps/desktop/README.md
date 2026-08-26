@@ -50,7 +50,7 @@ hermes update
 
 ## Requirements
 
-The installer handles everything for you (Python 3.11+, a portable Git, ripgrep).
+Install `uv` first (`winget install astral-sh.uv` on Windows; `brew install uv` or `pipx install uv` on macOS/Linux) — the installer uses your operator-installed `uv` and won't auto-download it. With `uv` present, the installer handles the rest for you (Python 3.11+, a portable Git, ripgrep), and stops with the exact command if `uv`, Node.js, or Git is missing.
 
 ---
 

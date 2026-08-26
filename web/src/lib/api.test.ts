@@ -4,28 +4,33 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api, fetchJSON } from "./api";
 
 const reloadMocks = vi.hoisted(() => ({
-  attemptDashboardTokenReloadOnce: vi.fn(() => false),
-  clearDashboardTokenReloadAttempt: vi.fn(),
+  attemptDashboardReloadOnce: vi.fn(() => false),
+  clearDashboardReloadAttempt: vi.fn(),
 }));
 
 vi.mock("./dashboard-auth-reload", () => ({
-  attemptDashboardTokenReloadOnce: reloadMocks.attemptDashboardTokenReloadOnce,
-  clearDashboardTokenReloadAttempt: reloadMocks.clearDashboardTokenReloadAttempt,
+  attemptDashboardReloadOnce: reloadMocks.attemptDashboardReloadOnce,
+  clearDashboardReloadAttempt: reloadMocks.clearDashboardReloadAttempt,
 }));
 
 const SESSION_HEADER = "X-Hermes-Session-Token";
 
 beforeEach(() => {
-  reloadMocks.attemptDashboardTokenReloadOnce.mockReset();
-  reloadMocks.attemptDashboardTokenReloadOnce.mockReturnValue(false);
-  reloadMocks.clearDashboardTokenReloadAttempt.mockReset();
+  reloadMocks.attemptDashboardReloadOnce.mockReset();
+  reloadMocks.attemptDashboardReloadOnce.mockReturnValue(false);
+  reloadMocks.clearDashboardReloadAttempt.mockReset();
 
   Object.defineProperty(window, "__HERMES_SESSION_TOKEN__", {
     configurable: true,
-    value: "stale-token",
+    value: undefined,
     writable: true,
   });
   Object.defineProperty(window, "__HERMES_AUTH_REQUIRED__", {
+    configurable: true,
+    value: false,
+    writable: true,
+  });
+  Object.defineProperty(window, "__HERMES_LOCAL_BROWSER_AUTH__", {
     configurable: true,
     value: false,
     writable: true,
@@ -48,7 +53,12 @@ function jsonFetchMock(body: unknown = { ok: true }) {
 }
 
 describe("fetchJSON", () => {
-  it("tries the one-shot reload path for loopback 401s", async () => {
+  it("returns to the bootstrap gate on a local-browser 401", async () => {
+    Object.defineProperty(window, "__HERMES_LOCAL_BROWSER_AUTH__", {
+      configurable: true,
+      value: true,
+      writable: true,
+    });
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => ({
@@ -61,15 +71,37 @@ describe("fetchJSON", () => {
         text: async () => "Unauthorized",
       })),
     );
-    reloadMocks.attemptDashboardTokenReloadOnce.mockReturnValue(true);
+    reloadMocks.attemptDashboardReloadOnce.mockReturnValue(true);
 
     const pending = fetchJSON("/api/status");
     await expect(Promise.race([pending, Promise.resolve("pending")])).resolves.toBe(
       "pending",
     );
 
-    expect(reloadMocks.attemptDashboardTokenReloadOnce).toHaveBeenCalledTimes(1);
-    expect(reloadMocks.clearDashboardTokenReloadAttempt).not.toHaveBeenCalled();
+    expect(reloadMocks.attemptDashboardReloadOnce).toHaveBeenCalledTimes(1);
+    expect(reloadMocks.clearDashboardReloadAttempt).not.toHaveBeenCalled();
+  });
+
+  it("does NOT reload on a 401 outside local-browser mode", async () => {
+    // Gated mode handles session expiry via the /login redirect envelope, not
+    // a reload; a plain 401 here must not trigger the return-to-gate reload.
+    Object.defineProperty(window, "__HERMES_AUTH_REQUIRED__", {
+      configurable: true,
+      value: true,
+      writable: true,
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        clone: () => ({ json: async () => ({}) }),
+        ok: false,
+        status: 401,
+        statusText: "Unauthorized",
+        text: async () => "Unauthorized",
+      })),
+    );
+    await expect(fetchJSON("/api/status")).rejects.toThrow();
+    expect(reloadMocks.attemptDashboardReloadOnce).not.toHaveBeenCalled();
   });
 
   it("clears the reload latch after a successful response", async () => {
@@ -84,7 +116,7 @@ describe("fetchJSON", () => {
 
     await expect(fetchJSON("/api/status")).resolves.toEqual({ ok: true });
 
-    expect(reloadMocks.clearDashboardTokenReloadAttempt).toHaveBeenCalledTimes(1);
+    expect(reloadMocks.clearDashboardReloadAttempt).toHaveBeenCalledTimes(1);
   });
 });
 

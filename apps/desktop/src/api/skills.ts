@@ -143,6 +143,60 @@ export function installSkillFromHub(identifier: string, profile?: ProfileScope):
   })
 }
 
+// A4 (Skills XPIA) two-step install. A postMessage from the embedded Hub is a
+// PROPOSAL: `proposeSkillFromHub` quarantines the skill server-side and returns
+// its transport-resolved commit + whole-bundle digest (NON-secret identity);
+// the trusted parent UI shows those and, on explicit confirm, echoes the EXACT
+// commit+digest back to `activateSkillFromHub`, which the server re-verifies
+// against the same quarantined artifact before installing. A remote message can
+// never become an activation on its own.
+export interface SkillHubProposal {
+  proposal_id: string
+  identifier: string
+  name: string
+  source: string
+  /** Transport-resolved 40-hex commit, or null for a network/mutable source
+   *  (in which case the digest alone is the identity the user confirms). */
+  commit: null | string
+  /** Deterministic whole-bundle sha256 — shown to the user and re-verified on
+   *  activate. */
+  digest: string
+  policy: string
+  policy_reason: string
+}
+
+export interface SkillHubActivation {
+  ok: boolean
+  name: string
+  identifier: string
+  commit: null | string
+  digest: string
+  path: string
+}
+
+export function proposeSkillFromHub(identifier: string, profile?: ProfileScope): Promise<SkillHubProposal> {
+  return window.hermesDesktop.api<SkillHubProposal>({
+    ...capabilityScoped(profile),
+    path: '/api/skills/hub/propose',
+    method: 'POST',
+    body: { identifier }
+  })
+}
+
+export function activateSkillFromHub(
+  proposalId: string,
+  commit: null | string,
+  digest: string,
+  profile?: ProfileScope
+): Promise<SkillHubActivation> {
+  return window.hermesDesktop.api<SkillHubActivation>({
+    ...capabilityScoped(profile),
+    path: '/api/skills/hub/activate',
+    method: 'POST',
+    body: { proposal_id: proposalId, commit, digest }
+  })
+}
+
 export function uninstallSkillFromHub(name: string, profile?: ProfileScope): Promise<ActionResponse> {
   return window.hermesDesktop.api<ActionResponse>({
     ...capabilityScoped(profile),

@@ -99,6 +99,10 @@ _CI_REVIEW_PATHS = (".github/workflows/", ".github/actions/")
 # Supply-chain scan: files that can execute code at install/import time.
 _SCAN_EXTS = (".py", ".pth")
 _SCAN_FILES = {"setup.cfg", "pyproject.toml"}
+# The supply-chain manifest/ledger (Work Package 4) drive check_supply_chain.py;
+# a JSON-only edit there must still run the supply-chain scan job so the
+# manifest schema, ledger coverage, and mutable-fetch surface are re-validated.
+_SCAN_PATHS = ("supply-chain/",)
 
 # MCP catalog files that require explicit security review.
 _MCP_CATALOG_PATHS = ("optional-mcps/",)
@@ -151,7 +155,7 @@ def _py_test_only(p: str) -> bool:
 
 
 def _is_scan(p: str) -> bool:
-    return p.endswith(_SCAN_EXTS) or p in _SCAN_FILES
+    return p.endswith(_SCAN_EXTS) or p in _SCAN_FILES or p.startswith(_SCAN_PATHS)
 
 
 def _is_mcp_catalog(p: str) -> bool:

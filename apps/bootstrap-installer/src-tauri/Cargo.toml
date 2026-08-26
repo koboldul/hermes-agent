@@ -23,6 +23,10 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+# A10: build.rs computes the SHA-256 of the pinned-commit install scripts and
+# bakes it into the binary so the runtime can byte-verify what it downloads.
+sha2 = "0.10"
+hex = "0.4"
 
 [dependencies]
 # Tauri runtime + plugins
@@ -42,6 +46,11 @@ serde_json = "1"
 
 # HTTP — rustls so we don't need OpenSSL on the build box
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+
+# A10: byte-level attestation of the downloaded/cached install script against
+# the digest baked at the pinned commit (build.rs).
+sha2 = "0.10"
+hex = "0.4"
 
 # Logging — emitted to a file under HERMES_HOME/logs/ and (optionally) the
 # webview console via Tauri's event channel.

@@ -154,7 +154,9 @@ class TestBuildWebUISkipsWhenFresh:
         args, kwargs = mock_run.call_args
         assert "--workspace" not in args[0]
         assert Path(args[0][0]).name in {"npm", "npm.cmd"}
-        assert args[0][1:] == ["ci", "--include=dev", "--silent", "--prefer-offline"]
+        # A4 audited lifecycle: --ignore-scripts is forced on every deterministic
+        # npm ci/install so no dependency runs arbitrary install-time code.
+        assert args[0][1:] == ["ci", "--include=dev", "--ignore-scripts", "--silent", "--prefer-offline"]
         assert kwargs["cwd"] == web_dir
         assert "ESBUILD_BINARY_PATH" not in kwargs["env"]
         assert "ESBUILD_BINARY_PATH" not in mock_build.call_args.kwargs["env"]

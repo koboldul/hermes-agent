@@ -403,7 +403,15 @@ Creating a shell hook (note the consent checkbox and the run-arbitrary-commands 
 ![New shell hook modal](/img/dashboard/admin-hook-create.png)
 
 :::warning Security
-The web dashboard reads and writes your `.env` file, which contains API keys and secrets. It binds to `127.0.0.1` by default — only accessible from your local machine, with no login required. Binding to any non-loopback address (including `0.0.0.0`) engages the [auth gate](#authentication-gated-mode): the server refuses to start until an auth provider (username/password or OAuth) is configured.
+The web dashboard reads and writes your `.env` file, which contains API keys
+and secrets. It binds to `127.0.0.1` by default, which restricts traffic to the
+host but does **not** authenticate one OS user. The current loopback browser
+dashboard has no login and must be treated as single-user-only. On a shared
+host, do not mount it directly: use an authenticated reverse proxy with
+`dashboard.public_url` configured, plus host firewall isolation. Binding to any
+non-loopback address (including `0.0.0.0`) engages the
+[auth gate](#authentication-gated-mode): the server refuses to start until an
+auth provider (username/password or OAuth) is configured.
 :::
 
 ## `/reload` Slash Command
@@ -607,7 +615,10 @@ When the dashboard is bound to a public or non-loopback address — anything oth
 - **[OAuth (Nous Portal)](#default-provider-nous-research)** — for hosted deployments and any dashboard reachable over the public internet, and the recommended path for a [remote Hermes Desktop connection](#connecting-hermes-desktop-to-a-remote-backend). Every login is verified against your Nous account, so this is the provider suitable for internet-facing use.
 - **[Self-hosted OIDC](#self-hosted-oidc-provider)** — for bringing your own identity provider via standard OpenID Connect (Keycloak, Auth0, Okta, Google, GitHub via an OIDC bridge, etc.). No Nous Portal involved; suitable for public-internet exposure when fronted by a conformant OIDC server.
 
-Operator-owned dashboards bound to loopback are unaffected — no auth, no login page.
+Dashboards bound directly to loopback currently have no auth and no login page.
+That is suitable only for a genuinely single-user host. Loopback means
+host-local, not user-authenticated; another OS user or co-tenant may still be
+able to connect to the port.
 
 ### When the gate engages
 
@@ -929,6 +940,12 @@ engages the OAuth gate.
 ### Public URL override
 
 By default, the dashboard reconstructs the OAuth callback URL from the request — `X-Forwarded-Host` + `X-Forwarded-Proto` + `X-Forwarded-Prefix` (when uvicorn is configured with `proxy_headers=True`, which `start_server` enables under the gate). This works out of the box behind a reverse proxy that sets all three headers correctly.
+
+Only enable proxy-header trust when the backend accepts traffic exclusively
+from a trusted proxy. A caller that can reach the backend directly must not be
+allowed to choose its canonical origin or cookie security attributes through
+`Forwarded` or `X-Forwarded-*`. For hardened deployments, set
+`dashboard.public_url` and firewall the backend listener to the proxy.
 
 For deploys behind reverse proxies that don't reliably forward those headers (manual nginx setups, on-prem ingresses, custom-domain deploys with partial proxy chains), set `dashboard.public_url` (or `HERMES_DASHBOARD_PUBLIC_URL`) to the **complete public URL** the dashboard is reached at:
 

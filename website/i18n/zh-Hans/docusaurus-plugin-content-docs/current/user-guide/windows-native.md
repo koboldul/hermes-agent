@@ -17,6 +17,16 @@ Hermes 可在 Windows 10 和 Windows 11 上原生运行——无需 WSL、Cygwin
 
 ## 快速安装
 
+:::warning 请先安装 `uv`
+安装程序使用 [`uv`](https://docs.astral.sh/uv/) 构建 Hermes 的 Python 环境，但出于供应链安全考虑**不会自动下载它**。请先安装 `uv`，再运行一行命令，然后用 `uv --version` 确认：
+
+```powershell
+winget install astral-sh.uv
+```
+
+若 `uv`、Node.js 或 Git 缺失，安装程序会停止并给出确切的安装命令，而不会拉取未经验证的二进制文件。`-AllowUnverifiedBootstrap` 开关会选择使用这些未经验证的安装器，不推荐使用。
+:::
+
 打开 **PowerShell**（或 Windows Terminal）并运行：
 
 ```powershell
@@ -45,7 +55,7 @@ iex (irm https://hermes-agent.nousresearch.com/install.ps1)
 
 ### 桌面安装程序（备选方案）
 
-也提供了一个轻量 GUI 安装程序——如果你更倾向于双击 `.exe` 而非打开 PowerShell，可以使用它。下载 Hermes Desktop，运行安装程序，首次启动时 GUI 会在后台调用 `install.ps1` 来配置 Python（通过 `uv`）、Node、PortableGit 以及下文描述的其余依赖引导流程。首次运行后，桌面应用与 PowerShell 安装的 `hermes` CLI 共享同一个 `%LOCALAPPDATA%\hermes\hermes-agent` 安装目录和 `%USERPROFILE%\.hermes` 数据目录——可以在 GUI 和 CLI 之间自由切换。
+也提供了一个轻量 GUI 安装程序——如果你更倾向于双击 `.exe` 而非打开 PowerShell，可以使用它。**请先安装 `uv`**（`winget install astral-sh.uv`）——与 PowerShell 一行命令一样，GUI 使用由操作者安装的 `uv`，不会自动下载它。下载 Hermes Desktop，运行安装程序，首次启动时 GUI 会在后台调用 `install.ps1`，用你已安装的 `uv` 构建 Python 环境，并引导 Node、PortableGit 以及下文描述的其余依赖；若 `uv`（或 Node/Git）缺失，它会给出确切的安装命令，而不会静默拉取未经验证的二进制文件。首次运行后，桌面应用与 PowerShell 安装的 `hermes` CLI 共享同一个 `%LOCALAPPDATA%\hermes\hermes-agent` 安装目录和 `%USERPROFILE%\.hermes` 数据目录——可以在 GUI 和 CLI 之间自由切换。
 
 如果你想要熟悉的 Windows 安装体验，或者要将 Hermes 交给非开发者使用，请使用桌面安装程序；如果你已经在终端中，请使用 PowerShell 一行命令。
 

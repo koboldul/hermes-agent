@@ -33,6 +33,39 @@ from utils import atomic_write_text
 logger = logging.getLogger(__name__)
 
 
+def plugin_bundle_digest(root: Path) -> str:
+    """Deterministic sha256 over an installed plugin tree (path + content).
+
+    Order-independent and path-normalized (posix separators) so the digest is
+    stable across platforms for a given set of files. Recorded in the install
+    metadata alongside the resolved commit so a plugin's activated bytes are
+    bound to an exact (commit, digest) identity — a later update to a different
+    digest is therefore detectable and requires re-review. ``.git`` and Python
+    bytecode caches are excluded (build noise, not plugin content).
+    """
+    import hashlib
+
+    digest = hashlib.sha256()
+    root = Path(root)
+    files = []
+    for p in sorted(root.rglob("*")):
+        if not p.is_file():
+            continue
+        rel = p.relative_to(root).as_posix()
+        parts = rel.split("/")
+        if ".git" in parts or "__pycache__" in parts or rel.endswith(".pyc"):
+            continue
+        files.append((rel, p))
+    for rel, p in sorted(files, key=lambda t: t[0]):
+        digest.update(rel.encode("utf-8"))
+        digest.update(b"\0")
+        try:
+            digest.update(hashlib.sha256(p.read_bytes()).digest())
+        except OSError:
+            digest.update(b"\0")
+    return digest.hexdigest()
+
+
 @functools.lru_cache(maxsize=1)
 def _resolve_git_executable() -> Optional[str]:
     """Resolve a git binary for subprocess use when ``PATH`` may be minimal.
@@ -775,6 +808,29 @@ def _install_plugin_core(
             _checkout_exact_revision(tmp_clone, git_exe, requested_revision)
         installed_revision = _git_head_revision(tmp_clone, git_exe)
 
+        # Supply-chain gate (WP4): installing/updating remote plugin code from a
+        # mutable HEAD (no pinned revision requested) requires an explicit
+        # reviewed identity. Fail closed unless the operator pinned an exact
+        # commit or allowed unverified plugin activation. The clone above is the
+        # quarantine; this gates the activation into the plugins tree.
+        if not requested_revision:
+            try:
+                from hermes_cli.supply_chain.gate import compat_opt_in
+
+                _plugins_ok = compat_opt_in("plugins")
+            except Exception:
+                _plugins_ok = False
+            if not _plugins_ok:
+                short = (installed_revision or "unknown")[:12]
+                raise PluginOperationError(
+                    f"Refusing to install plugin from a mutable git HEAD "
+                    f"(resolved {short}…) without a reviewed pinned identity. "
+                    f"Pin an exact commit (append #<40-char-sha> or use a pin), "
+                    f"or allow it in config: security.supply_chain."
+                    f"allow_unverified_components: [\"plugins\"]. See "
+                    f"docs/security/supply-chain-migration.md."
+                )
+
         tmp_target = (
             _resolve_subdir_within(tmp_clone, subdir) if subdir else tmp_clone
         )
@@ -853,9 +909,15 @@ def _install_plugin_core(
             )
 
         new_metadata = dict(old_metadata)
+        # Supply-chain (WP4 item 4): bind the activated plugin bytes to an exact
+        # (commit, whole-bundle digest) identity. Recorded for pinned (--ref) and
+        # for opted-in mutable installs alike, so a later update to a different
+        # digest is detectable and re-reviewable.
+        _bundle_digest = plugin_bundle_digest(tmp_target)
         new_metadata[plugin_name] = {
             "pinned": requested_revision is not None,
             "revision": installed_revision,
+            "bundle_sha256": _bundle_digest,
             "source": source,
         }
         backup = Path(tmp) / "previous-plugin"
@@ -1110,6 +1172,24 @@ def cmd_update(name: str) -> None:
         )
         sys.exit(1)
 
+    # Supply-chain (WP4 item 4): mutation detection. Compare the installed tree
+    # against the recorded whole-bundle digest BEFORE pulling. A mismatch means
+    # the installed plugin was modified out-of-band since install (manual edit or
+    # tampering) — surface it so the operator knows the base was not what was
+    # recorded.
+    _recorded_digest = str(install_record.get("bundle_sha256") or "")
+    if _recorded_digest:
+        try:
+            _current_digest = plugin_bundle_digest(target)
+        except Exception:
+            _current_digest = ""
+        if _current_digest and _current_digest != _recorded_digest:
+            console.print(
+                f"[yellow]Warning:[/yellow] '{name}' was modified since install "
+                f"(recorded bundle {_recorded_digest[:12]}…, now {_current_digest[:12]}…). "
+                f"Updating will replace the current contents."
+            )
+
     if not (target / ".git").exists():
         console.print(
             f"[red]Error:[/red] Plugin '{name}' was not installed from git "
@@ -1119,50 +1199,29 @@ def cmd_update(name: str) -> None:
 
     console.print(f"[dim]Updating {name}...[/dim]")
 
-    ok, output = _git_pull_plugin_dir(target)
-    if not ok:
-        console.print(f"[red]Error:[/red] {output}")
+    # A5: never pull a mutable HEAD in place onto the live plugin tree. Re-clone
+    # the recorded source into QUARANTINE, resolve the exact commit + expected
+    # whole-bundle digest, apply the activation gate (mutable HEAD requires an
+    # accepted identity or scoped break-glass), SCAN before swapping, then
+    # atomically publish with rollback. _install_plugin_core does all of this and
+    # records the (revision, bundle_sha256) metadata.
+    source = str(install_record.get("source") or "")
+    if not source:
+        console.print(
+            "[red]Error:[/red] no recorded source for this plugin; refusing to "
+            "pull a mutable HEAD in place. Reinstall it explicitly with "
+            f"`hermes plugins install <source> --force`."
+        )
         sys.exit(1)
 
-    if install_record:
-        git_exe = _resolve_git_executable()
-        if git_exe:
-            install_record["revision"] = _git_head_revision(target, git_exe)
-            metadata[target.name] = install_record
-            _write_install_metadata(metadata)
-
-    # Re-scan after update — Cowork re-scans skills/plugins on edit, and an
-    # update can introduce malicious content into a previously clean plugin.
-    # The pull has already mutated the tree, so a dangerous verdict disables
-    # the plugin rather than leaving it active.
-    if _scan_on_install_enabled():
-        from tools.plugin_guard import (
-            format_scan_report,
-            scan_plugin,
-            should_allow_plugin_install,
-        )
-
-        scan_result = scan_plugin(target, source=name)
-        allowed, reason = should_allow_plugin_install(scan_result)
-        if allowed is not True:
-            console.print()
-            console.print(
-                f"[yellow]⚠ Security scan flagged the updated plugin:[/yellow] {reason}",
-            )
-            console.print(format_scan_report(scan_result))
-            if scan_result.verdict == "dangerous":
-                enabled = _get_enabled_set()
-                disabled = _get_disabled_set()
-                if name in enabled or name not in disabled:
-                    enabled.discard(name)
-                    disabled.add(name)
-                    _save_enabled_set(enabled)
-                    _save_disabled_set(disabled)
-                console.print(
-                    f"[red]Plugin '{name}' has been disabled.[/red] Review the "
-                    f"findings, then re-enable with `hermes plugins enable {name}` "
-                    f"if you trust them.",
-                )
+    try:
+        target, _manifest, _pname = _install_plugin_core(source, force=True)
+    except PluginScanBlocked as exc:
+        console.print(f"[red]Update blocked (security scan):[/red] {exc}")
+        sys.exit(1)
+    except PluginOperationError as exc:
+        console.print(f"[red]Update blocked:[/red] {exc}")
+        sys.exit(1)
 
     # Same stale-bytecode class as the main checkout (#6207/#60242): the
     # pull just changed .py files under this plugin dir, so drop any
@@ -1194,14 +1253,7 @@ def cmd_update(name: str) -> None:
                 console, plugin_id, declared_caps, context="update"
             )
 
-    out = output.strip()
-    if "Already up to date" in out:
-        console.print(
-            f"[green]✓[/green] Plugin [bold]{name}[/bold] is already up to date."
-        )
-    else:
-        console.print(f"[green]✓[/green] Plugin [bold]{name}[/bold] updated.")
-        console.print(f"[dim]{out}[/dim]")
+    console.print(f"[green]✓[/green] Plugin [bold]{name}[/bold] updated.")
 
 
 def _remove_plugin_core(target: Path) -> None:
@@ -2864,26 +2916,35 @@ def dashboard_update_user_plugin(name: str) -> dict[str, Any]:
             "error": f"Plugin '{name}' is not a git checkout; cannot pull updates.",
         }
 
-    ok, msg = _git_pull_plugin_dir(target)
-    if not ok:
-        return {"ok": False, "error": msg}
-
-    if install_record:
-        git_exe = _resolve_git_executable()
-        if git_exe:
-            install_record["revision"] = _git_head_revision(target, git_exe)
-            metadata[target.name] = install_record
-            _write_install_metadata(metadata)
+    # A5: same policy as the CLI update — never pull a mutable HEAD in place.
+    # Re-clone the recorded source into quarantine, resolve commit + expected
+    # whole-bundle digest, gate (mutable HEAD needs an accepted identity or
+    # scoped break-glass), SCAN before swapping, atomically publish with
+    # rollback, and record the digest metadata.
+    source = str(install_record.get("source") or "")
+    if not source:
+        return {
+            "ok": False,
+            "error": (
+                f"Plugin '{name}' has no recorded source; refusing to pull a "
+                "mutable HEAD in place. Reinstall it explicitly."
+            ),
+        }
+    try:
+        target, _manifest, _pname = _install_plugin_core(source, force=True)
+    except PluginScanBlocked as exc:
+        return {"ok": False, "error": f"security scan blocked the update: {exc}"}
+    except PluginOperationError as exc:
+        return {"ok": False, "error": str(exc)}
 
     # Sibling of the CLI ``hermes plugins update`` path: drop bytecode
-    # compiled from the pre-pull plugin revision.
+    # compiled from the pre-update plugin revision.
     _clear_plugin_bytecode(target)
 
     from rich.console import Console
 
     _copy_example_files(target, Console())
-    unchanged = "Already up to date" in msg
-    return {"ok": True, "name": name, "output": msg, "unchanged": unchanged}
+    return {"ok": True, "name": name, "output": f"Updated {name}", "unchanged": False}
 
 
 def _clear_plugin_bytecode(target: Path) -> int:

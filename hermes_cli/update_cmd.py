@@ -1503,6 +1503,31 @@ def _update_via_zip(args, *, had_desktop_app_before_update: bool = False) -> boo
 
     Returns ``False`` when a Desktop rebuild ran and failed; ``True`` otherwise.
     """
+    # Supply-chain gate (WP4): this path replaces the source tree from a mutable
+    # refs/heads/<branch>.zip archive — no signed exact-release source archive
+    # exists to verify. Disabled by default; the git update (which records the
+    # exact remote commit) stays the first-party trust boundary. Explicit opt-in
+    # required.
+    try:
+        from hermes_cli.supply_chain.gate import compat_opt_in
+
+        _zip_compat = compat_opt_in("hermes-source-zip")
+    except Exception:
+        _zip_compat = False
+    if not _zip_compat:
+        print(
+            "✗ The Windows ZIP-fallback update is disabled by default "
+            "(supply-chain enforce): it would replace the source tree from an "
+            "unverified mutable branch archive."
+        )
+        print(
+            "  Resolve the git-side breakage and re-run `hermes update` (the git "
+            "path records the exact remote commit), or allow it in config: "
+            "security.supply_chain.allow_unverified_components: [\"hermes-source-zip\"]. "
+            "See docs/security/supply-chain-migration.md."
+        )
+        _m().sys.exit(1)
+
     active_tool_dependencies = _m()._capture_active_tool_dependencies()
 
     import tempfile
@@ -2885,6 +2910,22 @@ def _install_psutil_android_compat(
     import urllib.request
     from hermes_cli.psutil_android import PSUTIL_URL, prepare_patched_psutil_sdist
 
+    # Supply-chain (WP4): downloading + building a psutil sdist from PyPI is an
+    # unverified mutable fetch (same class as scripts/install_psutil_android.py).
+    # Fail closed under the secure default; the operator installs psutil on
+    # Termux themselves or opts in scoped.
+    from hermes_cli.supply_chain.gate import compat_opt_in
+
+    if not compat_opt_in("android-psutil"):
+        raise RuntimeError(
+            "Android psutil compat install is disabled by default (supply-chain "
+            "enforce): it downloads and builds an unverified psutil sdist. "
+            "Install psutil with your Termux package manager (pkg install "
+            "python-psutil), or allow it explicitly in config: "
+            'security.supply_chain.allow_unverified_components: ["android-psutil"]. '
+            "See docs/security/supply-chain-migration.md."
+        )
+
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         archive = tmp_path / "psutil.tar.gz"
@@ -2914,10 +2955,27 @@ def _ensure_uv_for_termux(pip_cmd: list[str]) -> str | None:
         return None
     # A Termux-packaged uv lands on PATH but not in the managed bin dir, so
     # resolve_uv() misses it. Use it before pip, which has no Android wheel and
-    # would otherwise build uv from source on a low-memory device.
-    system_uv = shutil.which("uv")
+    # would otherwise build uv from source on a low-memory device. Classifier-
+    # gate the raw which(): a uv reached via a PATH/symlink/case alias into ANY
+    # profile's managed root must present its provenance marker, not execute on
+    # the strength of the alias.
+    from hermes_cli.supply_chain.managed import accept_operator_path
+
+    system_uv = accept_operator_path(shutil.which("uv"), component="uv")
     if system_uv:
         return system_uv
+    # Supply-chain (WP4): the pip fallback fetches an unpinned uv wheel from
+    # PyPI. Under the secure default, skip it (best-effort helper) unless the
+    # operator opts in scoped for 'uv'. An operator uv on PATH is used above.
+    from hermes_cli.supply_chain.gate import compat_opt_in
+
+    if not compat_opt_in("uv"):
+        print(
+            "  → Termux: skipping automatic 'pip install uv' (supply-chain "
+            "enforce). Install uv with 'pkg install uv', or allow it in config: "
+            'security.supply_chain.allow_unverified_components: ["uv"].'
+        )
+        return None
     try:
         print("  → Termux detected: trying to install uv for faster dependency updates...")
         result = subprocess.run(
@@ -2929,8 +2987,10 @@ def _ensure_uv_for_termux(pip_cmd: list[str]) -> str | None:
             return None
     except Exception:
         pass
-    # After pip install, check managed path first, then PATH
-    return resolve_uv() or shutil.which("uv")
+    # After pip install, check managed path first, then a classifier-gated PATH.
+    from hermes_cli.supply_chain.managed import accept_operator_path
+
+    return resolve_uv() or accept_operator_path(shutil.which("uv"), component="uv")
 
 def _npm_manifest_paths() -> tuple[Path, ...]:
     """Manifests whose changes must defeat the update-skip.

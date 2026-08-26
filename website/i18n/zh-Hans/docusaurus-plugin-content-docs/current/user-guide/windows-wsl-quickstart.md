@@ -97,15 +97,17 @@ wsl --shutdown
 
 ### 在 WSL 内安装 Hermes
 
-打开 WSL2 shell 后执行：
+打开 WSL2 shell 后，请先安装 `uv`——安装程序用它构建 Hermes 的 Python 环境，且不会自动下载它：
 
 ```bash
+pipx install uv    # 或：brew install uv，或参见 https://docs.astral.sh/uv/getting-started/installation/
+uv --version       # 确认它已在 PATH 中
 curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
 source ~/.bashrc
 hermes
 ```
 
-安装程序将 WSL2 视为普通 Linux —— 无需任何 WSL 专属配置。完整目录结构请参阅[安装说明](/getting-started/installation)。
+安装程序将 WSL2 视为普通 Linux —— 无需任何 WSL 专属配置。若 `uv`、Node.js 或 Git 缺失，安装程序会停止并给出确切的安装命令，而不会拉取未经验证的二进制文件。完整目录结构请参阅[安装说明](/getting-started/installation)。
 
 ## 文件系统：跨越 Windows ↔ WSL2 边界
 

@@ -1,0 +1,9 @@
+{
+  "name": "hermes-lsp-pyright",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Hermes-owned immutable lock graph for the pyright language server. Do not edit by hand.",
+  "dependencies": {
+    "pyright": "1.1.413"
+  }
+}

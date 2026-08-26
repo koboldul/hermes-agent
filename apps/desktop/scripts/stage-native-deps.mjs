@@ -22,12 +22,123 @@ import {
   rmSync,
   writeFileSync
 } from 'node:fs'
+import { createHash, randomBytes } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
+import { homedir } from 'node:os'
 import { isMain } from './utils.mjs'
+import { nativeBindingDecision, nativePrebuildDecision, supplyChainAllowsUnverified } from './native-payload-verifier.mjs'
+import { publishThroughPythonTransaction } from './python-publish.mjs'
+import { isProductionPublish } from './release-gate.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const projectRoot = resolve(here, '..')
+const repoRoot = resolve(projectRoot, '..', '..')
 const require = createRequire(import.meta.url)
+
+// A8: sha256 of a file on disk (hex). Used to byte-verify a native binding
+// against the committed manifest digest before staging.
+function sha256File(filePath) {
+  return createHash('sha256').update(readFileSync(filePath)).digest('hex')
+}
+
+const _MANIFEST_PLATFORM = { win32: 'windows', darwin: 'macos', linux: 'linux' }
+const _MANIFEST_ARCH = { x64: 'x86_64', arm64: 'aarch64' }
+// The EXTRACTED member that is actually staged per platform. get-windows ships a
+// PE .node on Windows and a universal Mach-O helper ('main') on macOS.
+const _GET_WINDOWS_MEMBER = { win32: 'node-get-windows.node', darwin: 'main' }
+
+/**
+ * A8/A10: the committed sha256 of the get-windows EXTRACTED native member for a
+ * target, read from the artifact's ``member_digests`` (NOT the artifact
+ * ``digest``, which authenticates the archive URL bytes). Returns null when the
+ * manifest pins no member digest — the feature is then disabled for that target
+ * with NO network/build fallback.
+ */
+export function getWindowsPinnedDigest(
+  platform,
+  arch,
+  { manifestPath = join(repoRoot, 'supply-chain', 'manifest.json') } = {}
+) {
+  let manifest
+  try {
+    manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+  } catch {
+    return null
+  }
+  const comp = (manifest.components || []).find((c) => c.name === 'get-windows')
+  if (!comp) return null
+  const mp = _MANIFEST_PLATFORM[platform] ?? platform
+  const ma = _MANIFEST_ARCH[arch] ?? arch
+  const art = (comp.artifacts || []).find((a) => a.platform === mp && a.arch === ma)
+  if (!art) return null
+  const member = _GET_WINDOWS_MEMBER[platform]
+  if (!member) return null
+  // The member digest authenticates the extracted file we stage — never the
+  // archive `digest`. If they were confused, the on-disk binding would fail
+  // verification (the archive and the extracted file have different bytes).
+  const md = art.member_digests && art.member_digests[member]
+  return md && md.status === 'present' && typeof md.value === 'string'
+    ? md.value.trim().toLowerCase()
+    : null
+}
+
+/**
+ * The committed ARCHIVE digest (algorithm + value) for a get-windows target —
+ * authenticates the URL bytes a download verifier would fetch, NOT the extracted
+ * member. Exposed so a download path (and its tests) verify the archive, keeping
+ * the archive/member split explicit.
+ */
+export function getWindowsArchiveDigest(
+  platform,
+  arch,
+  { manifestPath = join(repoRoot, 'supply-chain', 'manifest.json') } = {}
+) {
+  let manifest
+  try {
+    manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+  } catch {
+    return null
+  }
+  const comp = (manifest.components || []).find((c) => c.name === 'get-windows')
+  if (!comp) return null
+  const mp = _MANIFEST_PLATFORM[platform] ?? platform
+  const ma = _MANIFEST_ARCH[arch] ?? arch
+  const art = (comp.artifacts || []).find((a) => a.platform === mp && a.arch === ma)
+  if (!art || !art.digest || art.digest.status !== 'present') return null
+  return { algorithm: String(art.digest.algorithm || '').toLowerCase(), value: String(art.digest.value || '').toLowerCase() }
+}
+
+/**
+ * A8: byte-verify + PE/Mach-O-classify a get-windows native binding BEFORE it is
+ * staged. Throws (fail closed) when the binding's format is wrong, it has no
+ * committed manifest digest (unmarked), or its bytes do not match the pinned
+ * digest (mutated/substituted). No network/build fallback.
+ */
+export function assertBindingVerified(filePath, platform, arch, pinnedDigestFor, label) {
+  const classified = classifyNativeBinary(filePath)
+  const actualSha256 = sha256File(filePath)
+  const pinnedDigest = pinnedDigestFor(platform, arch)
+  const decision = nativeBindingDecision({ classified, platform, actualSha256, pinnedDigest })
+  if (decision.action !== 'stage') {
+    throw new Error(
+      `[stage-native-deps] refusing to stage get-windows ${label} for ${platform}-${arch}: ${decision.reason}`
+    )
+  }
+}
+
+// Supply-chain (WP4 item 2): the network native rebuild (electron-rebuild
+// downloading headers + compiling) has no manifest identity. It is disabled by
+// default and runs ONLY with an explicit, config-only operator opt-in — never
+// automatically. Reads the canonical backend config; fails closed on any doubt.
+function nativeRebuildOptIn() {
+  try {
+    const home = process.env.HERMES_HOME || join(homedir(), '.hermes')
+    const text = readFileSync(join(home, 'config.yaml'), 'utf8')
+    return supplyChainAllowsUnverified('electron-native', text)
+  } catch {
+    return false
+  }
+}
 
 function makeExecutable(filePath) {
   chmodSync(filePath, 0o755)
@@ -306,12 +417,27 @@ export function stageNodePtyInto(srcRoot, destRoot, { platform = process.platfor
           `Build on the target platform or provide a prebuild.`
       )
     }
+    // Supply-chain (WP4 item 2): no lock-bound bundled prebuild was staged, so
+    // proceeding means a NETWORK native rebuild (electron-rebuild fetches
+    // headers + compiles) with no manifest identity. Fail closed unless the
+    // operator explicitly opted in — never automatically.
+    const decision = nativePrebuildDecision({
+      prebuildPresent: false,
+      hostMatches: true,
+      allowUnverifiedNativeRebuild: nativeRebuildOptIn()
+    })
+    if (decision.action === 'fail_closed') {
+      throw new Error(
+        `[stage-native-deps] refusing the unverified native rebuild for ${platform}-${arch}: ` +
+          `${decision.reason} See docs/security/supply-chain-migration.md.`
+      )
+    }
     // Same platform, possibly different arch — rebuild from source with
     // the target architecture so electron-rebuild produces the correct
     // binary rather than defaulting to the host's arch.
     console.log(
       `[stage-native-deps] no native binary for ${platform}-${arch}; ` +
-        `running electron-rebuild (target arch: ${arch})...`
+        `running electron-rebuild (target arch: ${arch}; explicit operator opt-in)...`
     )
     const rebuildArgs = [
       '../../node_modules/.bin/electron-rebuild',
@@ -437,7 +563,7 @@ const GET_WINDOWS_VERSION = '9.3.0'
 export function stageGetWindowsInto(
   srcRoot,
   destRoot,
-  { platform = process.platform, arch = process.arch, install } = {}
+  { platform = process.platform, arch = process.arch, pinnedDigestFor = getWindowsPinnedDigest } = {}
 ) {
   // The STAGED_WINDOWS_JS rewrite mirrors this exact version's export surface.
   // A version bump must fail the build here until the rewrite is re-verified —
@@ -474,6 +600,10 @@ export function stageGetWindowsInto(
     if (!existsSync(helper)) {
       throw new Error('[stage-native-deps] get-windows is missing its macOS helper binary (main)')
     }
+    // A8: byte-verify the universal Mach-O helper against the committed manifest
+    // digest and confirm its Mach-O magic BEFORE staging. A mutated/unmarked
+    // helper is rejected (fail closed) — no network/build fallback.
+    assertBindingVerified(helper, platform, arch, pinnedDigestFor, 'macOS helper (main)')
     cpSync(helper, join(destRoot, 'main'))
     makeExecutable(join(destRoot, 'main'))
   }
@@ -481,62 +611,40 @@ export function stageGetWindowsInto(
   if (platform === 'win32') {
     // The published tarball bundles a darwin binding dir on EVERY platform
     // (its `files` includes lib/), so a Windows host's lib/binding holds both
-    // that and the win32 dir node-pre-gyp downloaded. Stage only dirs naming
-    // the target platform; the classify gate below still catches a dir that
-    // claims win32 but holds a foreign binary.
+    // that and any win32 dir. Consider only dirs naming the target platform.
     const bindingRoot = join(srcRoot, 'lib', 'binding')
-    const scanBindingDirs = () =>
-      existsSync(bindingRoot)
-        ? readdirSync(bindingRoot).filter(
-            (dir) =>
-              dir.includes(`-${platform}-`) &&
-              dir.endsWith(`-${arch}`) &&
-              existsSync(join(bindingRoot, dir, 'node-get-windows.node'))
-          )
-        : []
-    let bindingDirs = scanBindingDirs()
-    let installAttempted = false
-    if (bindingDirs.length === 0 && arch === 'arm64') {
-      // get-windows 9.3.0 publishes win32 prebuilds for ia32/x64 only.
-      // The staged windows.js deliberately fails soft when binding/ is absent,
-      // so preserve the desktop build and disable only window enumeration.
+    const bindingDirs = existsSync(bindingRoot)
+      ? readdirSync(bindingRoot).filter(
+          (dir) =>
+            dir.includes(`-${platform}-`) &&
+            dir.endsWith(`-${arch}`) &&
+            existsSync(join(bindingRoot, dir, 'node-get-windows.node'))
+        )
+      : []
+
+    if (bindingDirs.length === 0) {
+      // The get-windows lifecycle script (`node-pre-gyp install
+      // --fallback-to-build`) is DISABLED in the root allowScripts allowlist,
+      // so `npm ci` never downloads or compiles the win32 .node. With no
+      // verified binding present, disable the feature (the staged windows.js
+      // fails soft when binding/ is absent) instead of reaching the
+      // network/build — there is NO fallback.
       console.warn(
-        '[stage-native-deps] get-windows has no win32-arm64 prebuilt binding; ' +
-          'staging the fail-soft JS surface without native window enumeration.'
+        `[stage-native-deps] get-windows has no verified win32-${arch} binding on disk; ` +
+          'staging the fail-soft JS surface without native window enumeration ' +
+          '(get-windows lifecycle install is disabled; a manifest-pinned binding must be ' +
+          'provided out-of-band to enable it).'
       )
-    } else if (bindingDirs.length === 0 && typeof install === 'function') {
-      // A plain `npm install` won't re-run an install script for a package
-      // that is already on disk, so every checkout that installed while
-      // get-windows was missing from allowScripts stays bricked even after
-      // the allowlist is fixed. Invoke node-pre-gyp directly: npm treats this
-      // optional dependency's failed lifecycle as non-fatal and can report a
-      // successful rebuild without producing the Windows binding.
-      console.log(
-        '[stage-native-deps] get-windows has no win32 binding; running its native installer...'
-      )
-      installAttempted = true
-      install()
-      bindingDirs = scanBindingDirs()
     }
-    if (bindingDirs.length === 0 && arch !== 'arm64') {
-      const reason = installAttempted
-        ? `native installer completed without producing a win32-${arch} binding under lib/binding`
-        : `has no win32-${arch} prebuilt binding under lib/binding`
-      throw new Error(`[stage-native-deps] get-windows ${reason}`)
-    }
+
     for (const dir of bindingDirs) {
+      const srcFile = join(bindingRoot, dir, 'node-get-windows.node')
+      // A8: byte-verify + PE-classify BEFORE staging. A mutated, unmarked, or
+      // wrong-platform binding is rejected (throws) — never staged, no fallback.
+      assertBindingVerified(srcFile, platform, arch, pinnedDigestFor, `binding ${dir}/node-get-windows.node`)
       const dest = join(destRoot, 'lib', 'binding', dir)
       mkdirSync(dest, { recursive: true })
-      const destFile = join(dest, 'node-get-windows.node')
-      cpSync(join(bindingRoot, dir, 'node-get-windows.node'), destFile)
-      const classified = classifyNativeBinary(destFile)
-      if (classified !== platform) {
-        throw new Error(
-          `[stage-native-deps] get-windows binding ${dir}/node-get-windows.node: ` +
-            `expected ${platform}, got ${classified ?? 'unknown'}. ` +
-            'Refusing to stage a binary compiled for the wrong platform.'
-        )
-      }
+      cpSync(srcFile, join(dest, 'node-get-windows.node'))
     }
   }
 
@@ -544,43 +652,51 @@ export function stageGetWindowsInto(
   return destRoot
 }
 
-export function installGetWindowsNativeBinding(
-  srcRoot,
-  { resolveInstaller, spawn = spawnSync } = {}
-) {
-  let installerPath
-  try {
-    const resolveNodePreGyp =
-      resolveInstaller ??
-      (() =>
-        require.resolve('@mapbox/node-pre-gyp/bin/node-pre-gyp', {
-          paths: [srcRoot]
-        }))
-    installerPath = resolveNodePreGyp()
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error)
-    throw new Error(`[stage-native-deps] cannot resolve get-windows native installer: ${detail}`)
-  }
+// A6: TRUE when the current invocation is a release build, so the get-windows
+// FINAL dest swap must go through the shared kernel-locked transaction with
+// fail-closed-when-unavailable semantics (a dev build degrades to a labeled
+// same-volume swap). Reads env/tag/attested signals + the electron-builder
+// wrapper's propagated publish flag.
+function _defaultGetWindowsIsRelease(env = process.env) {
+  return isProductionPublish([], env) || env.HERMES_DESKTOP_IS_PUBLISH === '1'
+}
 
-  const result = spawn(process.execPath, [installerPath, 'install', '--fallback-to-build'], {
-    cwd: srcRoot,
-    stdio: 'inherit'
-  })
-  if (result.error) {
-    throw new Error(
-      `[stage-native-deps] get-windows native installer could not start: ${result.error.message}`
-    )
+// A6: route the get-windows FINAL dest swap through the shared Python
+// kernel-locked (fcntl/msvcrt) transaction. The staged tree was assembled and
+// member-digest verified by stageGetWindowsInto (the BYTE authority); the
+// transaction adds cross-process serialization + an atomic swap into destRoot
+// WITH rollback + an anti-rollback state commit (state OUTSIDE node_modules).
+// `staged_sha256` is the committed ARCHIVE digest the manifest authenticates.
+export function publishGetWindowsFinal(
+  { stageRoot, destRoot, platform, arch, isRelease, publish = publishThroughPythonTransaction } = {}
+) {
+  const digest = getWindowsArchiveDigest(platform, arch)
+  try {
+    publish({
+      component: 'get-windows',
+      platform,
+      arch,
+      stagedSha256: digest && digest.value,
+      stageDir: stageRoot,
+      targetDir: destRoot,
+      statePath: null, // Python default: profile state, OUTSIDE node_modules
+      isRelease,
+      repoRoot,
+      env: process.env
+    })
+  } finally {
+    rmSync(stageRoot, { recursive: true, force: true })
   }
-  if (result.status !== 0) {
-    throw new Error(`[stage-native-deps] get-windows native installer exited with ${result.status}`)
-  }
+  return destRoot
 }
 
 export function stageGetWindows(
   {
     platform = process.platform,
     arch = process.arch,
-    resolveRoot = resolveGetWindowsRoot
+    resolveRoot = resolveGetWindowsRoot,
+    isRelease = _defaultGetWindowsIsRelease(),
+    publishFinal = publishGetWindowsFinal
   } = {}
 ) {
   const srcRoot = resolveRoot()
@@ -606,13 +722,19 @@ export function stageGetWindows(
     )
   }
 
-  // Only a win32 host can produce the win32 binding, so a cross-platform pack
-  // has nothing to gain from the native installer.
-  const install =
-    platform === 'win32' && process.platform === 'win32'
-      ? () => installGetWindowsNativeBinding(srcRoot)
-      : undefined
-  return stageGetWindowsInto(srcRoot, destRoot, { platform, arch, install })
+  // A8: the get-windows lifecycle install (`node-pre-gyp install
+  // --fallback-to-build`) is DISABLED in the root allowScripts allowlist, so
+  // there is NO network/build path here. stageGetWindowsInto byte-verifies any
+  // binding already on disk against the committed manifest digest and stages
+  // only a verified one; an absent binding disables the feature.
+  //
+  // A6: assemble + member-digest verify into a STAGE dir OUTSIDE the live dest,
+  // then route the FINAL dest swap through the shared kernel-locked transaction
+  // (publishGetWindowsFinal) instead of building destRoot in place.
+  const stageRoot = `${destRoot}.stage-${process.pid}-${randomBytes(3).toString('hex')}`
+  rmSync(stageRoot, { recursive: true, force: true })
+  stageGetWindowsInto(srcRoot, stageRoot, { platform, arch })
+  return publishFinal({ stageRoot, destRoot, platform, arch, isRelease })
 }
 
 // Allow direct CLI invocation: node scripts/stage-native-deps.mjs [platform] [arch]

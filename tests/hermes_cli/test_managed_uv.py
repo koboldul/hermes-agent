@@ -12,6 +12,27 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _uv_mechanics_opt_in(monkeypatch):
+    """These tests exercise the managed-uv install/resolve/self-update MECHANICS.
+
+    WP4 made ``ensure_uv()`` (a) prefer an operator-managed uv in place and
+    (b) gate the mutable Astral installer behind the supply-chain posture.
+    Neutralize both so the mechanics run deterministically regardless of
+    whether this dev machine has its own uv on PATH: no operator uv, gate
+    opted in. The secure-default fail-closed and operator-preference behavior
+    is proved in tests/supply_chain/ (test_uv_bootstrap.py).
+    """
+    monkeypatch.setattr(
+        "hermes_cli.managed_uv._probe_operator_uv", lambda: None, raising=False
+    )
+    monkeypatch.setattr(
+        "hermes_cli.supply_chain.gate._sc_config",
+        lambda: {"enforce": True, "allow_unverified_components": ["*"]},
+        raising=False,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -90,11 +111,16 @@ class TestManagedUvPath:
 class TestResolveUv:
 
     def test_existing_executable(self, tmp_path):
-        _make_executable(tmp_path / "bin" / "uv")
+        uv = tmp_path / "bin" / "uv"
+        _make_executable(uv)
         with patch("hermes_cli.managed_uv.get_hermes_home", return_value=tmp_path):
             from hermes_cli.managed_uv import resolve_uv
-            result = resolve_uv()
-            assert result == str(tmp_path / "bin" / "uv")
+            # A6: an unmarked managed uv is NOT resolved (treated as absent).
+            assert resolve_uv() is None
+            # Marking it makes resolve_uv return it.
+            from hermes_cli.supply_chain.managed import write_marker
+            write_marker(uv, component="uv", version="test", provenance="test")
+            assert resolve_uv() == str(uv)
 
     def test_non_executable_file_returns_none(self, tmp_path):
         uv = tmp_path / "bin" / "uv"

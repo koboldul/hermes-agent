@@ -1,0 +1,115 @@
+{
+  "manifest": {
+    "schema_version": 1,
+    "sequence": 1,
+    "min_sequence": 1,
+    "issued_at": "2026-08-25T00:00:00Z",
+    "expires_at": "2027-08-25T00:00:00Z",
+    "signer": {
+      "type": "github-artifact-attestation",
+      "issuer": "https://token.actions.githubusercontent.com",
+      "identity_regexp": "^https://github\\.com/NousResearch/hermes-agent/\\.github/workflows/release-attest\\.yml@refs/tags/v",
+      "repository": "NousResearch/hermes-agent",
+      "workflow": ".github/workflows/release-attest.yml",
+      "fingerprint_publication": "docs/security/supply-chain-trust-root.md"
+    },
+    "revocations": []
+  },
+  "components": [
+    {
+      "name": "uv",
+      "version": "pending-pin",
+      "trust_class": "transport_trusted",
+      "security_floor": null,
+      "review_date": "2026-08-25",
+      "eol": null,
+      "_comment": "Astral standalone uv installer. No committed byte digest or upstream provenance identity is available in this repository, so this stays transport_trusted (HTTPS + release-account trust only) and is NOT release-verified. Pinning requires the maintainer release script to record an exact uv version + per-artifact sha256.",
+      "artifacts": [
+        {"platform": "linux", "arch": "x86_64", "url": "https://github.com/astral-sh/uv/releases", "digest": {"algorithm": "sha256", "value": null, "status": "unavailable"}, "members": ["uv", "uvx"], "blocker": "No committed sha256 for uv-x86_64-unknown-linux-gnu; maintainer must run scripts/release/update_supply_chain_manifest.py.", "operator_guidance": "Install uv from your OS/version manager (e.g. 'pipx install uv', 'brew install uv', 'winget install astral-sh.uv') or the documented two-channel bootstrap in docs/security/supply-chain-trust-root.md."},
+        {"platform": "linux", "arch": "aarch64", "url": "https://github.com/astral-sh/uv/releases", "digest": {"algorithm": "sha256", "value": null, "status": "unavailable"}, "members": ["uv", "uvx"], "blocker": "No committed sha256 for uv-aarch64-unknown-linux-gnu; maintainer must run scripts/release/update_supply_chain_manifest.py.", "operator_guidance": "Install uv from your OS/version manager or the documented two-channel bootstrap in docs/security/supply-chain-trust-root.md."},
+        {"platform": "macos", "arch": "x86_64", "url": "https://github.com/astral-sh/uv/releases", "digest": {"algorithm": "sha256", "value": null, "status": "unavailable"}, "members": ["uv", "uvx"], "blocker": "No committed sha256 for uv-x86_64-apple-darwin; maintainer must run scripts/release/update_supply_chain_manifest.py.", "operator_guidance": "Install uv from your OS/version manager or the documented two-channel bootstrap in docs/security/supply-chain-trust-root.md."},
+        {"platform": "macos", "arch": "aarch64", "url": "https://github.com/astral-sh/uv/releases", "digest": {"algorithm": "sha256", "value": null, "status": "unavailable"}, "members": ["uv", "uvx"], "blocker": "No committed sha256 for uv-aarch64-apple-darwin; maintainer must run scripts/release/update_supply_chain_manifest.py.", "operator_guidance": "Install uv from your OS/version manager or the documented two-channel bootstrap in docs/security/supply-chain-trust-root.md."},
+        {"platform": "windows", "arch": "x86_64", "url": "https://github.com/astral-sh/uv/releases", "digest": {"algorithm": "sha256", "value": null, "status": "unavailable"}, "members": ["uv.exe", "uvx.exe"], "blocker": "No committed sha256 for uv-x86_64-pc-windows-msvc; maintainer must run scripts/release/update_supply_chain_manifest.py.", "operator_guidance": "Install uv from 'winget install astral-sh.uv' or the documented two-channel bootstrap in docs/security/supply-chain-trust-root.md."},
+        {"platform": "windows", "arch": "aarch64", "url": "https://github.com/astral-sh/uv/releases", "digest": {"algorithm": "sha256", "value": null, "status": "unavailable"}, "members": ["uv.exe", "uvx.exe"], "blocker": "No committed sha256 for uv-aarch64-pc-windows-msvc; maintainer must run scripts/release/update_supply_chain_manifest.py.", "operator_guidance": "Install uv from 'winget install astral-sh.uv' or the documented two-channel bootstrap in docs/security/supply-chain-trust-root.md."}
+      ]
+    },
+    {
+      "name": "node",
+      "version": "pending-pin",
+      "trust_class": "transport_trusted",
+      "security_floor": null,
+      "review_date": "2026-08-25",
+      "eol": null,
+      "_comment": "nodejs.org portable runtime. nodejs.org publishes SHASUMS256.txt per release, but those checksums arrive over the same channel as the archive; the immutable-identity requirement needs the exact version + digest committed here after maintainer review. Until then this is transport_trusted, not release-verified.",
+      "artifacts": [
+        {"platform": "linux", "arch": "x86_64", "url": "https://nodejs.org/dist/", "digest": {"algorithm": "sha256", "value": null, "status": "unavailable"}, "members": [], "blocker": "No committed sha256 for node-*-linux-x64.tar.xz; maintainer must pin an exact patch release + digest.", "operator_guidance": "Install Node.js from your OS/version manager (nvm, fnm, apt, brew) or the documented two-channel bootstrap in docs/security/supply-chain-trust-root.md."},
+        {"platform": "linux", "arch": "aarch64", "url": "https://nodejs.org/dist/", "digest": {"algorithm": "sha256", "value": null, "status": "unavailable"}, "members": [], "blocker": "No committed sha256 for node-*-linux-arm64.tar.xz; maintainer must pin an exact patch release + digest.", "operator_guidance": "Install Node.js from your OS/version manager or the documented two-channel bootstrap in docs/security/supply-chain-trust-root.md."},
+        {"platform": "macos", "arch": "x86_64", "url": "https://nodejs.org/dist/", "digest": {"algorithm": "sha256", "value": null, "status": "unavailable"}, "members": [], "blocker": "No committed sha256 for node-*-darwin-x64.tar.xz; maintainer must pin an exact patch release + digest.", "operator_guidance": "Install Node.js from your OS/version manager or the documented two-channel bootstrap in docs/security/supply-chain-trust-root.md."},
+        {"platform": "macos", "arch": "aarch64", "url": "https://nodejs.org/dist/", "digest": {"algorithm": "sha256", "value": null, "status": "unavailable"}, "members": [], "blocker": "No committed sha256 for node-*-darwin-arm64.tar.xz; maintainer must pin an exact patch release + digest.", "operator_guidance": "Install Node.js from your OS/version manager or the documented two-channel bootstrap in docs/security/supply-chain-trust-root.md."},
+        {"platform": "windows", "arch": "x86_64", "url": "https://nodejs.org/dist/", "digest": {"algorithm": "sha256", "value": null, "status": "unavailable"}, "members": [], "blocker": "No committed sha256 for node-*-win-x64.zip; maintainer must pin an exact patch release + digest.", "operator_guidance": "Install Node.js from your OS/version manager (winget, nvm-windows) or the documented two-channel bootstrap in docs/security/supply-chain-trust-root.md."},
+        {"platform": "windows", "arch": "aarch64", "url": "https://nodejs.org/dist/", "digest": {"algorithm": "sha256", "value": null, "status": "unavailable"}, "members": [], "blocker": "No committed sha256 for node-*-win-arm64.zip; maintainer must pin an exact patch release + digest.", "operator_guidance": "Install Node.js from your OS/version manager or the documented two-channel bootstrap in docs/security/supply-chain-trust-root.md."}
+      ]
+    },
+    {
+      "name": "cua-driver",
+      "version": "pending-pin",
+      "trust_class": "transport_trusted",
+      "security_floor": null,
+      "review_date": "2026-08-25",
+      "eol": null,
+      "_comment": "trycua/cua computer-use driver. The current installer is fetched from the mutable 'main' branch and has no committed digest or provenance identity; this is transport_trusted until a maintainer pins a release artifact + digest, or an installer commit SHA + script digest.",
+      "artifacts": [
+        {"platform": "linux", "arch": "x86_64", "url": "https://github.com/trycua/cua/releases", "digest": {"algorithm": "sha256", "value": null, "status": "unavailable"}, "members": [], "blocker": "No committed digest for the cua-driver artifact and no pinned installer commit SHA.", "operator_guidance": "Install the cua driver manually per trycua/cua release notes, or wait for a reviewed pinned manifest entry. See docs/security/supply-chain-trust-root.md."},
+        {"platform": "linux", "arch": "aarch64", "url": "https://github.com/trycua/cua/releases", "digest": {"algorithm": "sha256", "value": null, "status": "unavailable"}, "members": [], "blocker": "No committed digest for the cua-driver artifact and no pinned installer commit SHA.", "operator_guidance": "Install the cua driver manually per trycua/cua release notes, or wait for a reviewed pinned manifest entry. See docs/security/supply-chain-trust-root.md."},
+        {"platform": "macos", "arch": "x86_64", "url": "https://github.com/trycua/cua/releases", "digest": {"algorithm": "sha256", "value": null, "status": "unavailable"}, "members": [], "blocker": "No committed digest for the cua-driver artifact and no pinned installer commit SHA.", "operator_guidance": "Install the cua driver manually per trycua/cua release notes, or wait for a reviewed pinned manifest entry. See docs/security/supply-chain-trust-root.md."},
+        {"platform": "macos", "arch": "aarch64", "url": "https://github.com/trycua/cua/releases", "digest": {"algorithm": "sha256", "value": null, "status": "unavailable"}, "members": [], "blocker": "No committed digest for the cua-driver artifact and no pinned installer commit SHA.", "operator_guidance": "Install the cua driver manually per trycua/cua release notes, or wait for a reviewed pinned manifest entry. See docs/security/supply-chain-trust-root.md."}
+      ]
+    },
+    {
+      "name": "tirith",
+      "version": "pending-pin",
+      "trust_class": "transport_trusted",
+      "security_floor": null,
+      "review_date": "2026-08-25",
+      "eol": null,
+      "_comment": "sheeki03/tirith security scanner. Upstream publishes a Sigstore keyless provenance identity (recorded per-artifact below) which IS an independent anchor; however the installed code still resolves 'releases/latest' with no exact version pin, so the component stays transport_trusted until an exact release is pinned. When pinned, this component becomes release_verified via provenance.",
+      "artifacts": [
+        {"platform": "linux", "arch": "x86_64", "url": "https://github.com/sheeki03/tirith/releases", "digest": {"algorithm": "sha256", "value": null, "status": "unavailable"}, "members": ["tirith"], "provenance": {"type": "github-artifact-attestation", "issuer": "https://token.actions.githubusercontent.com", "identity_regexp": "^https://github\\.com/sheeki03/tirith/\\.github/workflows/release\\.yml@refs/tags/v"}, "blocker": "Version is resolved as 'releases/latest' in code; pin an exact tirith release to satisfy the immutable-identity requirement.", "operator_guidance": "Tirith is optional; when unpinned, Hermes falls back to pattern-matching guards. See docs/security/supply-chain-trust-root.md."},
+        {"platform": "linux", "arch": "aarch64", "url": "https://github.com/sheeki03/tirith/releases", "digest": {"algorithm": "sha256", "value": null, "status": "unavailable"}, "members": ["tirith"], "provenance": {"type": "github-artifact-attestation", "issuer": "https://token.actions.githubusercontent.com", "identity_regexp": "^https://github\\.com/sheeki03/tirith/\\.github/workflows/release\\.yml@refs/tags/v"}, "blocker": "Version is resolved as 'releases/latest' in code; pin an exact tirith release.", "operator_guidance": "Tirith is optional; when unpinned, Hermes falls back to pattern-matching guards. See docs/security/supply-chain-trust-root.md."},
+        {"platform": "macos", "arch": "x86_64", "url": "https://github.com/sheeki03/tirith/releases", "digest": {"algorithm": "sha256", "value": null, "status": "unavailable"}, "members": ["tirith"], "provenance": {"type": "github-artifact-attestation", "issuer": "https://token.actions.githubusercontent.com", "identity_regexp": "^https://github\\.com/sheeki03/tirith/\\.github/workflows/release\\.yml@refs/tags/v"}, "blocker": "Version is resolved as 'releases/latest' in code; pin an exact tirith release.", "operator_guidance": "Tirith is optional; when unpinned, Hermes falls back to pattern-matching guards. See docs/security/supply-chain-trust-root.md."},
+        {"platform": "macos", "arch": "aarch64", "url": "https://github.com/sheeki03/tirith/releases", "digest": {"algorithm": "sha256", "value": null, "status": "unavailable"}, "members": ["tirith"], "provenance": {"type": "github-artifact-attestation", "issuer": "https://token.actions.githubusercontent.com", "identity_regexp": "^https://github\\.com/sheeki03/tirith/\\.github/workflows/release\\.yml@refs/tags/v"}, "blocker": "Version is resolved as 'releases/latest' in code; pin an exact tirith release.", "operator_guidance": "Tirith is optional; when unpinned, Hermes falls back to pattern-matching guards. See docs/security/supply-chain-trust-root.md."}
+      ]
+    },
+    {
+      "name": "electron",
+      "version": "41.10.3",
+      "trust_class": "release_verified",
+      "security_floor": null,
+      "review_date": "2026-08-25",
+      "eol": null,
+      "_comment": "Electron runtime for the desktop app. The npm tarball (electron-41.10.3.tgz) is lock-integrity-bound (sha512) in the root package-lock.json; the per-platform binary archive is the canonical Electron release ZIP whose exact sha256 is COMMITTED below (taken from node_modules/electron/checksums.json, which electron@41.10.3 ships in its package `files` and which @electron/get verifies against the signed SHASUMS256.txt). apps/desktop/scripts/verify-native-payloads.mjs compares the package-bundled checksums.json against THIS committed digest for the exact target before any build — a mirror (ELECTRON_MIRROR) may change WHERE the archive is fetched, never the accepted digest. node-pty / get-windows native binaries are staged only from lock-bound bundled prebuilds; the network rebuild fails closed.",
+      "artifacts": [
+        {"platform": "linux", "arch": "x86_64", "url": "https://github.com/electron/electron/releases/download/v41.10.3/electron-v41.10.3-linux-x64.zip", "digest": {"algorithm": "sha256", "value": "333c08c551387056966838a9f55cb10cf8203e68ca99e83982ce53ddd40383e9", "status": "present"}, "members": ["electron"]},
+        {"platform": "linux", "arch": "aarch64", "url": "https://github.com/electron/electron/releases/download/v41.10.3/electron-v41.10.3-linux-arm64.zip", "digest": {"algorithm": "sha256", "value": "1c18f4e9a67a6b5affb33596d8c886f35063e0439cbef79a6fc7037d147d1bbb", "status": "present"}, "members": ["electron"]},
+        {"platform": "macos", "arch": "x86_64", "url": "https://github.com/electron/electron/releases/download/v41.10.3/electron-v41.10.3-darwin-x64.zip", "digest": {"algorithm": "sha256", "value": "7218af14b48457ed128f33392bf0497725300db97d474b6cca7237f0c44d847d", "status": "present"}, "members": ["electron"]},
+        {"platform": "macos", "arch": "aarch64", "url": "https://github.com/electron/electron/releases/download/v41.10.3/electron-v41.10.3-darwin-arm64.zip", "digest": {"algorithm": "sha256", "value": "8961cdb57c95c073ff4770bc9309953832f447575f1a91127010f7b4870884b3", "status": "present"}, "members": ["electron"]},
+        {"platform": "windows", "arch": "x86_64", "url": "https://github.com/electron/electron/releases/download/v41.10.3/electron-v41.10.3-win32-x64.zip", "digest": {"algorithm": "sha256", "value": "266d2ce4ec9ca9e60f3abc06752cbd76899268a85b6540fa1765518621e33207", "status": "present"}, "members": ["electron.exe"]},
+        {"platform": "windows", "arch": "aarch64", "url": "https://github.com/electron/electron/releases/download/v41.10.3/electron-v41.10.3-win32-arm64.zip", "digest": {"algorithm": "sha256", "value": "2acdb9c78b069f9d9c395a7b7ae97e726d3a7e86925423317908eead0780ce6a", "status": "present"}, "members": ["electron.exe"]}
+      ]
+    },
+    {
+      "name": "get-windows",
+      "version": "9.3.0",
+      "trust_class": "release_verified",
+      "security_floor": null,
+      "review_date": "2026-08-25",
+      "eol": null,
+      "_comment": "get-windows native window-detection binding for the desktop app (read_window_below). Its npm lifecycle script ('node-pre-gyp install --fallback-to-build') is DISABLED in the root package.json allowScripts allowlist, so 'npm ci' never downloads or compiles a native binary and node-pre-gyp is never spawned. The Windows N-API binding (node-get-windows.node, a PE) is downloaded by node-pre-gyp from the package's GitHub releases host as a .tar.gz; the macOS Swift helper ('main', a universal Mach-O) ships inside the lock-integrity-bound npm tarball. PROVENANCE SPLIT: each artifact 'digest' authenticates the URL BYTES (the archive: the GitHub .tar.gz for Windows, the npm .tgz for macOS whose sha512 EQUALS the root package-lock integrity for get-windows), while 'member_digests' pins the sha256 of the EXTRACTED file that is actually staged. apps/desktop/scripts/stage-native-deps.mjs verifies the MEMBER digest of the on-disk binding AND its PE/Mach-O magic before staging; a download verifier would check the archive 'digest'. A mutated/unpinned/unmarked member is REJECTED (fail closed); a target with no member digest (win32-arm64, linux) has the feature disabled with no network/build fallback.",
+      "artifacts": [
+        {"platform": "windows", "arch": "x86_64", "url": "https://github.com/sindresorhus/get-windows/releases/download/v9.3.0/napi-9-win32-unknown-x64.tar.gz", "digest": {"algorithm": "sha256", "value": "3eecfad06ed44f379bc50e02d738fa5dde274ce0206ced4c58b8f776ec9d76b0", "status": "present"}, "members": ["node-get-windows.node"], "member_digests": {"node-get-windows.node": {"algorithm": "sha256", "value": "528cf76b3d7b85bcaf9c0fac928b3150bb338de41c9185ce1f06e2a4d998ebbf", "status": "present"}}},
+        {"platform": "macos", "arch": "x86_64", "url": "https://registry.npmjs.org/get-windows/-/get-windows-9.3.0.tgz", "digest": {"algorithm": "sha512", "value": "0eb39f41298872c15ac76f057d25236cb4df78e9001bbc9e87a3426fff73cd1903b829576aa62a1ee4013d4a9ca9dd6e612ef4ca0604452a2869c300c2f6f257", "status": "present"}, "members": ["main"], "member_digests": {"main": {"algorithm": "sha256", "value": "687d4f4d69428f91fcd576887a34e9a0778756868f705e644cbc48cd76a9d4aa", "status": "present"}}},
+        {"platform": "macos", "arch": "aarch64", "url": "https://registry.npmjs.org/get-windows/-/get-windows-9.3.0.tgz", "digest": {"algorithm": "sha512", "value": "0eb39f41298872c15ac76f057d25236cb4df78e9001bbc9e87a3426fff73cd1903b829576aa62a1ee4013d4a9ca9dd6e612ef4ca0604452a2869c300c2f6f257", "status": "present"}, "members": ["main"], "member_digests": {"main": {"algorithm": "sha256", "value": "687d4f4d69428f91fcd576887a34e9a0778756868f705e644cbc48cd76a9d4aa", "status": "present"}}}
+      ]
+    }
+  ]
+}

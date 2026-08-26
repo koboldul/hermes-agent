@@ -22,6 +22,8 @@ from hermes_cli.web_deps import late, LateState
 from hermes_cli.web_models import (
     SkillContentUpdate,
     SkillCreate,
+    SkillHubActivateRequest,
+    SkillHubProposeRequest,
     SkillInstallRequest,
     SkillToggle,
     SkillUninstallRequest,
@@ -424,6 +426,153 @@ async def scan_skill_hub(identifier: str = "", profile: Optional[str] = None):
         raise HTTPException(status_code=502, detail=f"Hub scan failed: {exc}")
     if result is None:
         raise HTTPException(status_code=404, detail=f"Skill not found: {ident}")
+    return result
+
+
+# ---------------------------------------------------------------------------
+# A4 (Skills XPIA) two-step install: propose -> trusted-UI confirm -> activate.
+#
+# A postMessage from the embedded Skills-Hub iframe is a PROPOSAL, never an
+# authorization. ``propose`` fetches+scans+quarantines the skill and returns
+# ONLY non-secret identity (transport-resolved commit + deterministic
+# whole-bundle digest + scan policy). The desktop app shows those to the user
+# and, on confirmation, echoes the exact commit+digest back to ``activate``,
+# which atomically consumes the SAME quarantined artifact, re-verifies identity
+# (commit drift / digest drift / on-disk mutation / replay all fail closed), and
+# only then activates through the WP4 gate. ``skip_confirm`` / a raw remote
+# message can never mint acceptance — acceptance is derived server-side from the
+# confirmed identity matching the quarantined artifact.
+# ---------------------------------------------------------------------------
+
+# Map the module's stable failure ``reason`` codes to HTTP status. Drift/replay/
+# mutation/policy are client-correctable 409s; a bad identifier is 404.
+_ACTIVATE_STATUS = {
+    "replay": 409,
+    "commit-drift": 409,
+    "digest-drift": 409,
+    "mutation": 409,
+    "policy-blocked": 409,
+    "not-found": 404,
+}
+
+
+def _hub_propose_deps(profile: Optional[str]):
+    """Build the real propose dependencies bound to *profile*'s hub sources."""
+    from hermes_cli import skill_proposal as sp
+    from hermes_cli.skills_hub import _resolve_source_meta_and_bundle
+    from tools.skills_hub import (
+        _whole_bundle_digest,
+        bundle_exact_identity,
+        create_source_router,
+        quarantine_bundle,
+    )
+    from tools.skills_guard import scan_skill, should_allow_install
+
+    def _resolve(identifier: str):
+        with _config_profile_scope(profile):
+            sources = create_source_router()
+            meta, bundle, _src = _resolve_source_meta_and_bundle(identifier, sources)
+        if not bundle:
+            return None
+        return (meta, bundle)
+
+    return sp.ProposeDeps(
+        resolve_bundle=_resolve,
+        quarantine=quarantine_bundle,
+        scan=scan_skill,
+        policy=lambda result: should_allow_install(result, force=False),
+        digest_of=_whole_bundle_digest,
+        commit_of=bundle_exact_identity,
+    )
+
+
+@hub_router.post("/api/skills/hub/propose")
+async def propose_skill_hub(body: SkillHubProposeRequest, profile: Optional[str] = None):
+    """Quarantine a hub skill and return its non-secret exact identity.
+
+    Installs NOTHING. The returned ``proposal_id`` authorizes exactly one later
+    ``/activate`` call, and only if the confirmed commit+digest still match.
+    """
+    from hermes_cli import skill_proposal as sp
+
+    identifier = (body.identifier or "").strip()
+    if not identifier:
+        raise HTTPException(status_code=400, detail="identifier is required")
+    effective = body.profile or profile
+
+    def _run():
+        return sp.propose(identifier, _hub_propose_deps(effective))
+
+    try:
+        return await asyncio.to_thread(_run)
+    except sp.ProposalNotFound:
+        raise HTTPException(status_code=404, detail=f"Skill not found: {identifier}")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _log.exception("skills hub propose failed")
+        raise HTTPException(status_code=502, detail=f"Hub propose failed: {exc}")
+
+
+@hub_router.post("/api/skills/hub/activate")
+async def activate_skill_hub(body: SkillHubActivateRequest, profile: Optional[str] = None):
+    """Activate a previously proposed hub skill after trusted-UI confirmation.
+
+    Atomically consumes the stored proposal, re-verifies the confirmed
+    commit+digest against the quarantined artifact (drift/replay/mutation fail
+    closed), then installs through the WP4 activation gate.
+    """
+    from hermes_cli import skill_proposal as sp
+    from tools.skills_hub import install_from_quarantine
+
+    proposal_id = (body.proposal_id or "").strip()
+    if not proposal_id:
+        raise HTTPException(status_code=400, detail="proposal_id is required")
+    digest = (body.digest or "").strip()
+    if not digest:
+        raise HTTPException(status_code=400, detail="digest is required")
+    effective = body.profile or profile
+
+    def _install(record: "sp.Proposal"):
+        # The acceptance flag is minted HERE — server-side, after identity was
+        # proven in activate_proposal — never carried from the client message.
+        with _config_profile_scope(effective):
+            return install_from_quarantine(
+                record.quarantine_path,
+                record.name,
+                record.category,
+                record.bundle,
+                record.scan_result,
+                record.scan_provenance,
+                activation_accepted=True,
+                expected_bundle_digest=record.digest,
+            )
+
+    def _run():
+        return sp.activate_proposal(
+            proposal_id,
+            body.commit,
+            digest,
+            sp.ActivateDeps(install=_install),
+        )
+
+    try:
+        result = await asyncio.to_thread(_run)
+    except sp.ProposalError as exc:
+        status = _ACTIVATE_STATUS.get(exc.reason, 409)
+        raise HTTPException(status_code=status, detail={"reason": exc.reason, "message": str(exc)})
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _log.exception("skills hub activate failed")
+        raise HTTPException(status_code=502, detail=f"Hub activate failed: {exc}")
+
+    # Invalidate the skills prompt cache so the newly-activated skill is picked
+    # up (same contract the CLI installer uses).
+    try:
+        _clear_skills_prompt_cache()
+    except Exception:
+        _log.debug("skills prompt cache clear skipped", exc_info=True)
     return result
 
 

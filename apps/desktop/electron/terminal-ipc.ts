@@ -7,15 +7,17 @@ import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 
-import { app, ipcMain } from 'electron'
+import { app } from 'electron'
 import nodePty from 'node-pty'
 
 import { resolveTerminalConnection } from './connection-apply'
+import { type IpcRegistrar } from './ipc-registry'
 import { ensureSpawnHelperExecutable } from './spawn-helper-perms'
 import { buildInteractiveSshArgs } from './ssh-connection'
 import { buildWindowsInteractiveCommand } from './windows-remote-lifecycle'
 
 export interface TerminalIpcDeps {
+  registrar: IpcRegistrar
   isWindows: boolean
   findOnPath: (command: string) => null | string
   rememberLog: (line: string) => void
@@ -31,6 +33,7 @@ export interface TerminalIpcApi {
 }
 
 export function registerTerminalIpc({
+  registrar,
   isWindows,
   findOnPath,
   rememberLog,
@@ -39,6 +42,11 @@ export function registerTerminalIpc({
   getSshConnectionState
 }: TerminalIpcDeps): TerminalIpcApi {
   const terminalSessions = new Map()
+
+  // The PTY host is privileged: only a registered app window's trusted main
+  // frame at the packaged app origin may open/drive a terminal (SEC-AUDIT-005).
+  const terminalHandle = (channel: string, handler: (event: any, ...args: any[]) => unknown) =>
+    registrar.handle(channel, 'terminal', handler)
 
   function isExecutableFile(filePath) {
     if (!filePath || !path.isAbsolute(filePath)) {
@@ -283,7 +291,7 @@ export function registerTerminalIpc({
     }
   }
 
-  ipcMain.handle('hermes:terminal:start', async (event, payload = {}) => {
+  terminalHandle('hermes:terminal:start', async (event, payload = {}) => {
     ensureNodePtySpawnHelper()
 
     const id = crypto.randomUUID()
@@ -335,7 +343,7 @@ export function registerTerminalIpc({
     return { cwd: remote ? null : cwd, id, shell: remote ? 'ssh' : name }
   })
 
-  ipcMain.handle('hermes:terminal:write', (_event, id, data) => {
+  terminalHandle('hermes:terminal:write', (_event, id, data) => {
     const sessionInfo = terminalSessions.get(String(id || ''))
 
     if (!sessionInfo) {
@@ -347,7 +355,7 @@ export function registerTerminalIpc({
     return true
   })
 
-  ipcMain.handle('hermes:terminal:resize', (_event, id, size = {}) => {
+  terminalHandle('hermes:terminal:resize', (_event, id, size = {}) => {
     const sessionInfo = terminalSessions.get(String(id || ''))
 
     if (!sessionInfo) {
@@ -361,7 +369,7 @@ export function registerTerminalIpc({
 
     return true
   })
-  ipcMain.handle('hermes:terminal:cwd', async (_event, id) => {
+  terminalHandle('hermes:terminal:cwd', async (_event, id) => {
     const sessionInfo = terminalSessions.get(String(id || ''))
 
     if (!sessionInfo) {
@@ -371,7 +379,7 @@ export function registerTerminalIpc({
     return sessionInfo.sshScope !== undefined ? null : readProcessCwd(sessionInfo.pty.pid)
   })
 
-  ipcMain.handle('hermes:terminal:dispose', (_event, id) => disposeTerminalSession(String(id || '')))
+  terminalHandle('hermes:terminal:dispose', (_event, id) => disposeTerminalSession(String(id || '')))
 
   return { disposeTerminalSession, disposeTerminalSessionsForSshScope, disposeAllTerminalSessions }
 }
