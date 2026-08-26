@@ -19,6 +19,8 @@ use tokio::io::AsyncWriteExt;
 
 use crate::paths;
 
+const INSTALL_REPOSITORY: &str = "koboldul/hermes-agent";
+
 /// Identity of the install.ps1 we'll execute. Used by both the manifest
 /// fetch and the per-stage runs.
 #[derive(Debug, Clone)]
@@ -483,11 +485,7 @@ async fn download(
     dest_path: &Path,
     require_attested: bool,
 ) -> Result<()> {
-    let url = format!(
-        "https://raw.githubusercontent.com/NousResearch/hermes-agent/{}/scripts/{}",
-        commit_or_ref,
-        kind.filename()
-    );
+    let url = install_script_url(commit_or_ref, kind);
 
     if let Some(parent) = dest_path.parent() {
         std::fs::create_dir_all(parent).with_context(|| {
@@ -557,6 +555,13 @@ async fn download(
     Ok(())
 }
 
+fn install_script_url(commit_or_ref: &str, kind: ScriptKind) -> String {
+    format!(
+        "https://raw.githubusercontent.com/{INSTALL_REPOSITORY}/{commit_or_ref}/scripts/{}",
+        kind.filename()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -568,6 +573,17 @@ mod tests {
         assert!(!is_valid_commit("02d269"));
         assert!(!is_valid_commit("not-a-sha"));
         assert!(!is_valid_commit(""));
+    }
+
+    #[test]
+    fn install_script_downloads_from_the_fork() {
+        assert_eq!(
+            install_script_url("a".repeat(40).as_str(), ScriptKind::Ps1),
+            format!(
+                "https://raw.githubusercontent.com/koboldul/hermes-agent/{}/scripts/install.ps1",
+                "a".repeat(40)
+            )
+        );
     }
 
     // ── A10: attested (production) installer identity ──────────────────────
