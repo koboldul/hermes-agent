@@ -77,6 +77,7 @@ const RULES: Rule[] = [
   // ── config / settings mutation (chat) ──
   prefix('hermes:data-url-read-max:', 'config'),
   prefix('hermes:setting:', 'config'),
+  prefix('hermes:secret-storage:', 'config'),
   prefix('hermes:quick-entry:settings:', 'config'),
   exact('hermes:devtools:disable-f12', 'config'),
   exact('hermes:keep-awake', 'config'),

@@ -835,6 +835,15 @@ def _migrate_to_39(results: Dict[str, Any], quiet: bool) -> None:
     # effective ``manual``. Any other explicit strategy (``manual``/``off``)
     # is the user's own and is preserved; a config already carrying a matching
     # consent marker keeps ``auto``.
+    #
+    # ── Version 38 → 39: remove the retired `bfl` toolset from saved lists ──
+    # The six bfl_flux3_* core tools shipped for a free FLUX 3 promotional
+    # period that has since ended server-side, leaving every Nous-signed-in
+    # install paying ~2.7K tokens of schema per API call for tools that can
+    # only refuse. They were removed in favor of the standard video_gen
+    # provider surface (`video_generate`, `hermes tools` → Video Generation).
+    # Strip the toolset key wherever the auto-backfill or a picker save wrote
+    # it, so stale config can't resurrect an unknown toolset.
     _c = _cfg()
     read_raw_config = _c.read_raw_config
     _persist_migration = _c._persist_migration
@@ -842,32 +851,54 @@ def _migrate_to_39(results: Dict[str, Any], quiet: bool) -> None:
     from agent.lsp.consent import CONSENT_KEY, CONSENT_POLICY_VERSION
 
     config = read_raw_config()
+    changed = False
     lsp = config.get("lsp")
-    if not isinstance(lsp, dict):
-        return
-    raw_strategy = str(lsp.get("install_strategy", "")).strip().lower()
-    if raw_strategy != "auto":
-        return
-    consent = lsp.get(CONSENT_KEY)
-    consent_ok = (
-        (isinstance(consent, int) and not isinstance(consent, bool))
-        or (isinstance(consent, str) and consent.strip().isdigit())
-    ) and int(consent) == CONSENT_POLICY_VERSION
-    if consent_ok:
-        return
-    lsp["install_strategy"] = "manual"
-    lsp.pop(CONSENT_KEY, None)
-    config["lsp"] = lsp
-    _persist_migration(config)
-    message = (
-        "LSP auto-install now requires explicit consent: install_strategy "
-        "downgraded to 'manual'. Re-enable the pinned, reviewed LSP bundle "
-        "with `hermes lsp enable-auto-install`."
-    )
-    results["config_added"].append("lsp.install_strategy=manual (was: auto, unconsented)")
-    results["warnings"].append(message)
-    if not quiet:
-        print(f"  ⚠ {message}")
+    if isinstance(lsp, dict):
+        raw_strategy = str(lsp.get("install_strategy", "")).strip().lower()
+        consent = lsp.get(CONSENT_KEY)
+        consent_ok = (
+            (isinstance(consent, int) and not isinstance(consent, bool))
+            or (isinstance(consent, str) and consent.strip().isdigit())
+        ) and int(consent) == CONSENT_POLICY_VERSION
+        if raw_strategy == "auto" and not consent_ok:
+            lsp["install_strategy"] = "manual"
+            lsp.pop(CONSENT_KEY, None)
+            config["lsp"] = lsp
+            changed = True
+            message = (
+                "LSP auto-install now requires explicit consent: install_strategy "
+                "downgraded to 'manual'. Re-enable the pinned, reviewed LSP bundle "
+                "with `hermes lsp enable-auto-install`."
+            )
+            results["config_added"].append(
+                "lsp.install_strategy=manual (was: auto, unconsented)"
+            )
+            results["warnings"].append(message)
+            if not quiet:
+                print(f"  ⚠ {message}")
+
+    removed_bfl = False
+    for section in ("platform_toolsets", "known_builtin_toolsets"):
+        mapping = config.get(section)
+        if not isinstance(mapping, dict):
+            continue
+        for platform, toolsets in mapping.items():
+            if isinstance(toolsets, list) and "bfl" in toolsets:
+                mapping[platform] = [ts for ts in toolsets if ts != "bfl"]
+                changed = True
+                removed_bfl = True
+        if removed_bfl:
+            config[section] = mapping
+    if changed:
+        _persist_migration(config)
+    if removed_bfl:
+        results["config_added"].append("removed retired 'bfl' toolset from saved toolset lists")
+        if not quiet:
+            print(
+                "  ✓ Removed the retired BFL FLUX 3 toolset from saved toolset "
+                "lists — video generation now lives under `hermes tools` → "
+                "Video Generation (Nous Subscription or FAL)."
+            )
 
 
 #: Registry of (target_version, migration_fn), strictly ascending. The driver
