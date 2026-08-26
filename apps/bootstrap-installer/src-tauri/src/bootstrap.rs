@@ -481,7 +481,8 @@ async fn run_bootstrap(
 
     // 1. Resolve install.ps1 (A10: attested production installers require an
     //    exact full-commit identity — see install_script::require_attested).
-    let script = install_script::resolve(kind, &pin, install_script::require_attested(), &emit_log)
+    let require_attested = install_script::require_attested();
+    let script = install_script::resolve(kind, &pin, require_attested, &emit_log)
         .await
         .map_err(|e| {
             let msg = format!("resolve install script failed: {e:#}");
@@ -514,7 +515,7 @@ async fn run_bootstrap(
     // the manifest comes back missing the desktop stage and we never run
     // it. The per-stage call below also passes -IncludeDesktop to keep
     // the contracts identical.
-    let manifest_args = build_pin_args(&script);
+    let manifest_args = build_pin_args(&script, require_attested);
     let mut manifest_args_full = vec!["-Manifest".to_string()];
     manifest_args_full.extend(manifest_args.clone());
     if args.include_desktop {
@@ -924,11 +925,17 @@ async fn run_install_script(
         })
 }
 
-fn build_pin_args(script: &install_script::ResolvedScript) -> Vec<String> {
+fn build_pin_args(
+    script: &install_script::ResolvedScript,
+    force_pinned_commit: bool,
+) -> Vec<String> {
     let mut out = Vec::new();
     if let Some(c) = &script.commit {
         out.push("-Commit".to_string());
         out.push(c.clone());
+        if force_pinned_commit {
+            out.push("-ForceCommit".to_string());
+        }
     }
     if let Some(b) = &script.branch {
         out.push("-Branch".to_string());
@@ -1016,6 +1023,36 @@ mod tests {
         ));
         std::fs::create_dir_all(&base).unwrap();
         base
+    }
+
+    #[test]
+    fn release_pin_args_force_the_exact_commit() {
+        let script = install_script::ResolvedScript {
+            path: PathBuf::from("install.ps1"),
+            source: ScriptSource::Downloaded,
+            commit: Some("a".repeat(40)),
+            branch: Some("main".to_string()),
+        };
+
+        assert_eq!(
+            build_pin_args(&script, true),
+            vec![
+                "-Commit".to_string(),
+                "a".repeat(40),
+                "-ForceCommit".to_string(),
+                "-Branch".to_string(),
+                "main".to_string(),
+            ]
+        );
+        assert_eq!(
+            build_pin_args(&script, false),
+            vec![
+                "-Commit".to_string(),
+                "a".repeat(40),
+                "-Branch".to_string(),
+                "main".to_string(),
+            ]
+        );
     }
 
     // Build a fake built-desktop release tree at the platform's expected path

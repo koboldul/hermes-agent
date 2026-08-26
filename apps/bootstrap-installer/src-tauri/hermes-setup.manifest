@@ -19,10 +19,10 @@
     <assemblyIdentity
         version="0.0.1.0"
         processorArchitecture="*"
-        name="NousResearch.Hermes.Setup"
+        name="koboldul.Hermes.Fork.Setup"
         type="win32"
     />
-    <description>Hermes Setup</description>
+    <description>Hermes Fork Setup</description>
 
     <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
         <security>

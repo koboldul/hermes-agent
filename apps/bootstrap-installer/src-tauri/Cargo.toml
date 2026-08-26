@@ -2,7 +2,7 @@
 name = "hermes-bootstrap"
 version = "0.0.1"
 description = "Hermes fork installer pinned to koboldul/hermes-agent"
-authors = ["Nous Research <info@nousresearch.com>"]
+authors = ["koboldul", "Nous Research <info@nousresearch.com>"]
 edition = "2021"
 rust-version = "1.77"
 
