@@ -319,17 +319,25 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0hermes.ps1" %*
         Write-Host "Open a new terminal, then run: hermes setup"
     }
 } catch {
+    $installFailure = $_
     if ($installedNewTree -and (Test-Path -LiteralPath $install)) {
-        Remove-Item -LiteralPath $install -Recurse -Force -ErrorAction SilentlyContinue
+        if (-not (Remove-DirectoryWithRetry -Path $install)) {
+            $recovery = if ($hadExisting -and (Test-Path -LiteralPath $backup)) {
+                "The previous install is preserved at $backup."
+            } else {
+                "No previous install existed."
+            }
+            throw "Install failed and the replacement at $install could not be removed. $recovery Original error: $($installFailure.Exception.Message)"
+        }
     }
     if ($hadExisting -and (Test-Path -LiteralPath $backup)) {
         try {
             Move-DirectoryWithRetry -Source $backup -Destination $install
         } catch {
-            Write-Error "Could not restore previous install from $backup"
+            throw "Install failed; the previous install is preserved at $backup but automatic restore to $install failed. Original error: $($installFailure.Exception.Message)"
         }
     }
-    throw
+    throw $installFailure
 } finally {
     if (Test-Path -LiteralPath $archive) {
         Remove-Item -LiteralPath $archive -Force -ErrorAction SilentlyContinue
