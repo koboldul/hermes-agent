@@ -1,8 +1,11 @@
 from unittest.mock import patch
 
+import pytest
+
 from tools.environments.local import LocalEnvironment
 
 
+@pytest.mark.linux_only
 class TestLocalTempDir:
     def test_uses_os_tmpdir_for_session_artifacts(self, monkeypatch):
         monkeypatch.setenv("TMPDIR", "/data/data/com.termux/files/usr/tmp")
@@ -15,7 +18,6 @@ class TestLocalTempDir:
         assert env.get_temp_dir() == "/data/data/com.termux/files/usr/tmp"
         assert env._snapshot_path == f"/data/data/com.termux/files/usr/tmp/hermes-snap-{env._session_id}.sh"
         assert env._cwd_file == f"/data/data/com.termux/files/usr/tmp/hermes-cwd-{env._session_id}.txt"
-
 
     def test_falls_back_to_tempfile_when_tmp_missing(self, monkeypatch):
         monkeypatch.delenv("TMPDIR", raising=False)

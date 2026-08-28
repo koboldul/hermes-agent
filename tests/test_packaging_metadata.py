@@ -286,6 +286,39 @@ def test_build_system_requires_exempt_from_exclude_newer():
     )
 
 
+def test_exact_pins_are_exempt_from_exclude_newer():
+    """Exact-reviewed pins must not depend on index upload-time metadata."""
+    data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    uv_cfg = data.get("tool", {}).get("uv", {})
+    if "exclude-newer" not in uv_cfg:
+        pytest.skip("no exclude-newer cutoff configured — nothing to exempt")
+
+    specs = _pyproject_pinned_specs()
+    specs.extend(data.get("build-system", {}).get("requires", []))
+    exact_pins = set(_pins_from_specs(specs))
+    whitelist = {
+        _canonical(name)
+        for name, enabled in uv_cfg.get("exclude-newer-package", {}).items()
+        if enabled is False
+    }
+
+    missing = sorted(exact_pins - whitelist)
+    assert not missing, (
+        "exact-pinned packages cannot float but remain subject to exclude-newer; "
+        f"resolvers with missing upload metadata will brick: {missing}"
+    )
+
+    documented_non_exact_exceptions = {
+        "python-olm",
+        "unpaddedbase64",
+    }
+    unexpected = sorted(whitelist - exact_pins - documented_non_exact_exceptions)
+    assert not unexpected, (
+        "non-exact packages bypass exclude-newer without a documented "
+        f"missing-upload-date rationale: {unexpected}"
+    )
+
+
 
 
 def _lazy_deps_by_feature():
