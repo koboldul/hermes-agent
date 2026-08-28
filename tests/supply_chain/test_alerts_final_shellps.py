@@ -88,7 +88,10 @@ echo "OK"
 ''',
         encoding="utf-8",
     )
-    r = subprocess.run([_BASH, str(script)], capture_output=True, text=True, timeout=120)
+    # Native Windows Git Bash can spend multiple seconds starting every
+    # realpath/hash helper process, especially under parallel suite load.
+    timeout = 240 if sys.platform == "win32" else 120
+    r = subprocess.run([_BASH, str(script)], capture_output=True, text=True, timeout=timeout)
     assert "OK" in r.stdout and r.returncode == 0, (r.returncode, r.stdout, r.stderr)
 
 

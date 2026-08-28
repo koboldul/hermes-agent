@@ -69,8 +69,12 @@ def _run(script_body: str, tmp_path: Path) -> subprocess.CompletedProcess:
         "HERMES_NODE_MIN_VERSION": "18",
     }
     env.pop("_HERMES_SC_BOOTSTRAP_OVERRIDE", None)
+    # The verifier itself is fast, but native Windows Git Bash pays
+    # multi-second MSYS startup costs for every shell hash/path helper and
+    # Windows-Python bridge. Preserve the tighter POSIX bound.
+    timeout = 180 if sys.platform == "win32" else 90
     return subprocess.run(
-        [_BASH, str(drv)], capture_output=True, text=True, env=env, timeout=90
+        [_BASH, str(drv)], capture_output=True, text=True, env=env, timeout=timeout
     )
 
 

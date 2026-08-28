@@ -249,7 +249,11 @@ def _extract_and_run(script_body: str, tmp_path: Path) -> subprocess.CompletedPr
         "HOME": str(home),
         "HERMES_HOME": str(home / ".hermes"),
     }
-    return subprocess.run([_BASH, str(drv)], capture_output=True, text=True, env=env, timeout=60)
+    # Git Bash pays multi-second MSYS startup costs for each realpath/hash
+    # helper process on native Windows. Keep the POSIX bound tight while
+    # allowing the same behavioral path to complete under loaded Windows CI.
+    timeout = 180 if sys.platform == "win32" else 60
+    return subprocess.run([_BASH, str(drv)], capture_output=True, text=True, env=env, timeout=timeout)
 
 
 @pytest.mark.skipif(_BASH is None, reason="bash unavailable")
