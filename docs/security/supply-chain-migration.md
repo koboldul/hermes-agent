@@ -21,6 +21,7 @@ Under the default, these no longer auto-install/upgrade unverified code:
 | Managed Node (Windows heal, POSIX bootstrap, install scripts) | downloaded `nodejs.org/dist/latest-v…` | disabled; install Node via your manager |
 | Managed npm upgrade | semver-range registry upgrade | disabled; current npm preserved |
 | cua-driver (install + auto-repair) | ran trycua `main`-branch installer | disabled; compatible existing driver preserved |
+| Windows install repository ZIP fallback | downloaded an unverified branch/tag/commit archive after Git clone failures | disabled; repair Git or explicitly pass `-AllowUnverifiedBootstrap` |
 | Hermes update ZIP fallback | downloaded `refs/heads/<branch>.zip` | disabled; use the git update (records exact commit) |
 | tirith scanner auto-install | downloaded `releases/latest` | disabled; degrades to pattern-matching guards |
 | Lazy dependency installs | installed unpinned PyPI packages | disabled; `pip install` the extra yourself |
@@ -86,6 +87,8 @@ marker.
 
 - **Pre-config shell / PowerShell installers (before config exists):** pass the
   explicit CLI flag — there is **no environment-variable interface**.
+  On Windows, this flag also permits the unverified repository ZIP fallback
+  when both SSH and HTTPS Git clones fail.
   ```bash
   ./setup-hermes.sh --allow-unverified-bootstrap
   # scripts/install.sh --allow-unverified-bootstrap

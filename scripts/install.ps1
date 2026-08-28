@@ -16,9 +16,10 @@ param(
     [switch]$NoVenv,
     [switch]$SkipSetup,
     [switch]$SkipComputerUse,
-    # Supply-chain (WP4): opt into the UNVERIFIED installers (uv/Node/npm/cua)
-    # for this run. Secure by default; without it, a missing tool must come from
-    # your OS/version manager. Sets an internal bridge, not a user env var.
+    # Supply-chain (WP4): opt into UNVERIFIED bootstrap paths (repository ZIP,
+    # uv/Node/npm/cua) for this run. Secure by default; without it, repository
+    # acquisition requires git and missing tools must come from your OS/version
+    # manager. Sets an internal bridge, not a user env var.
     [switch]$AllowUnverifiedBootstrap,
     [string]$Branch = "main",
     # -Commit and -Tag are higher-precedence variants of -Branch for users
@@ -86,7 +87,11 @@ $ErrorActionPreference = "Stop"
 # user-facing environment variable.
 if ($AllowUnverifiedBootstrap) {
     $env:_HERMES_SC_BOOTSTRAP_OVERRIDE = "1"
-    Write-Host "WARNING: -AllowUnverifiedBootstrap: running UNVERIFIED transport-trusted installers (not release-verified)." -ForegroundColor Yellow
+    Write-Host "WARNING: -AllowUnverifiedBootstrap: allowing UNVERIFIED transport-trusted bootstrap paths (repository ZIP and installers; not release-verified)." -ForegroundColor Yellow
+}
+
+function Test-UnverifiedBootstrapAllowed {
+    return ($env:_HERMES_SC_BOOTSTRAP_OVERRIDE -eq "1")
 }
 
 # Supply-chain (WP4 A7): gate the UNVERIFIED pip fallback cascade. Hermes'
@@ -99,7 +104,7 @@ if ($AllowUnverifiedBootstrap) {
 # default: fail closed so the caller aborts and the venv transaction rolls back
 # to the previous working install.
 function Test-UnverifiedPipFallbackAllowed {
-    return ($env:_HERMES_SC_BOOTSTRAP_OVERRIDE -eq "1")
+    return (Test-UnverifiedBootstrapAllowed)
 }
 
 function Assert-UnverifiedPipFallbackAllowed {
@@ -111,6 +116,15 @@ function Assert-UnverifiedPipFallbackAllowed {
         "not hash-verified. Re-run install.ps1 -AllowUnverifiedBootstrap to opt " +
         "in (UNVERIFIED), or repair uv.lock so the hash-verified install " +
         "succeeds. See docs/security/supply-chain-migration.md")
+}
+
+function Assert-UnverifiedRepositoryZipFallbackAllowed {
+    if (Test-UnverifiedBootstrapAllowed) { return }
+    throw ("Repository ZIP fallback is disabled by default (supply-chain " +
+        "enforce): archives are transport-trusted but are not verified against " +
+        "a release digest before their code is installed and executed. Repair " +
+        "git/antivirus filesystem access and retry, or re-run install.ps1 " +
+        "-AllowUnverifiedBootstrap to opt in (UNVERIFIED).")
 }
 
 # Suppress Invoke-WebRequest's per-chunk progress bar.  Windows PowerShell
@@ -2653,10 +2667,14 @@ function Install-Repository {
             } catch { }
         }
 
-        # Fallback: download ZIP archive (bypasses git file I/O issues entirely)
+        # Fallback: download a transport-trusted ZIP archive. This bypasses git
+        # file I/O, but the archive has no independently trusted digest, so it
+        # requires the same explicit break-glass opt-in as other unverified
+        # bootstrap paths.
         if (-not $cloneSuccess) {
+            Assert-UnverifiedRepositoryZipFallbackAllowed
             if (Test-Path $InstallDir) { Remove-Item -Recurse -Force $InstallDir -ErrorAction SilentlyContinue }
-            Write-Warn "Git clone failed -- downloading ZIP archive instead..."
+            Write-Warn "Git clone failed -- downloading UNVERIFIED ZIP archive instead..."
             try {
                 # Pick the ZIP URL for the most-specific ref the caller asked
                 # for.  GitHub supports archive URLs for commits, tags, and

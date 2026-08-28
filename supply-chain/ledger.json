@@ -202,6 +202,21 @@
       "mutable_fetch": false
     },
     {
+      "id": "install-ps1-repository-zip",
+      "description": "scripts/install.ps1 Install-Repository: transport-trusted GitHub ZIP fallback after Git clone failures is disabled by default; requires -AllowUnverifiedBootstrap.",
+      "source": "scripts/install.ps1",
+      "trust_owner": "transport_trusted",
+      "component": null,
+      "verifier": "scripts/install.ps1 Assert-UnverifiedRepositoryZipFallbackAllowed",
+      "activation_point": "scripts/install.ps1 Install-Repository ZIP fallback",
+      "negative_test": "tests/test_install_ps1_repository_zip_fallback_gate.py",
+      "platforms": [
+        "windows"
+      ],
+      "migration_state": "explicitly_disabled",
+      "mutable_fetch": true
+    },
+    {
       "id": "node-bootstrap-sh",
       "description": "scripts/lib/node-bootstrap.sh managed Node: (download) mutable nodejs.org fetch in _nb_install_bundled_node disabled by default, gated on the internal bootstrap bridge (--allow-unverified-bootstrap or Hermes after reading config). (A1 execution) a Hermes-managed Node ($HERMES_HOME/node/bin/{node,npm,npx}, incl. a PATH/symlink alias into any managed root) is EXECUTED — even for --version — only when it carries a current provenance marker (binary sha256), verified BEFORE execution in _nb_have_modern_node, the explicit managed block, and _nb_managed_node_needs_heal; an unmarked/tampered tree is ignored so an operator/system Node is used in place or heal fails closed. A verified bundled install writes markers for node/npm/npx (matches install.sh + hermes_constants).",
       "source": "scripts/lib/node-bootstrap.sh",
