@@ -591,7 +591,8 @@ export const zh: Translations = {
       embedsOff: '关闭',
       embedsReset: (count: number) => `重置 ${count} 个已允许的服务`,
       linkPreviewsTitle: '链接预览',
-      linkPreviewsDesc: '为链接获取页面标题和网站图标。默认关闭：开启前 Hermes 不会发起任何请求，且应用始终校验并固定每个目标地址。',
+      linkPreviewsDesc:
+        '为链接获取页面标题和网站图标。默认关闭：开启前 Hermes 不会发起任何请求，且应用始终校验并固定每个目标地址。',
       product: '产品',
       productDesc: '易读的工具活动与简洁摘要。',
       technical: '技术',
@@ -1543,7 +1544,8 @@ export const zh: Translations = {
       actionLog: '操作日志',
       alreadyInstalled: name => `“${name}”已安装`,
       confirmTitle: (name: string) => `从技能中心安装“${name}”？`,
-      confirmDetail: '此请求来自嵌入的技能中心浏览器。安装前请核对下方固定的身份标识——Hermes 会在激活前于服务器端重新校验。',
+      confirmDetail:
+        '此请求来自嵌入的技能中心浏览器。安装前请核对下方固定的身份标识——Hermes 会在激活前于服务器端重新校验。',
       confirmSource: (source: string) => `来源：${source}`,
       confirmCommitLabel: '固定提交',
       confirmDigestLabel: '捆绑摘要',

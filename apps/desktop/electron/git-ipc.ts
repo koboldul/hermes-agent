@@ -61,9 +61,7 @@ export function registerGitIpc({ registrar, resolveGitBinary, resolveGhBinary }:
 
   gitHandle('hermes:git:branchList', async (_event, repoPath) => listBranches(repoPath, resolveGitBinary()))
 
-  gitHandle('hermes:git:baseBranchList', async (_event, repoPath) =>
-    listBaseBranches(repoPath, resolveGitBinary())
-  )
+  gitHandle('hermes:git:baseBranchList', async (_event, repoPath) => listBaseBranches(repoPath, resolveGitBinary()))
 
   // Compact repo status (branch, ahead/behind, change counts + files) for the
   // composer coding rail. Returns null on a non-repo / remote backend so the rail

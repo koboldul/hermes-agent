@@ -114,7 +114,10 @@ export function configureIpcAuthz(config: Partial<AppOriginConfig>): void {
  * subframe (an embedded provider, an in-app browsed page) is never app origin,
  * even inside an otherwise-trusted webContents.
  */
-export function frameUrlIsAppOrigin(frameUrl: null | string | undefined, config: AppOriginConfig = originConfig): boolean {
+export function frameUrlIsAppOrigin(
+  frameUrl: null | string | undefined,
+  config: AppOriginConfig = originConfig
+): boolean {
   if (!frameUrl) {
     return false
   }
@@ -203,13 +206,7 @@ export interface AuthzInput {
 }
 
 export type AuthzReason =
-  | 'destroyed'
-  | 'no-frame'
-  | 'not-main-frame'
-  | 'ok'
-  | 'unregistered'
-  | 'wrong-capability'
-  | 'wrong-origin'
+  'destroyed' | 'no-frame' | 'not-main-frame' | 'ok' | 'unregistered' | 'wrong-capability' | 'wrong-origin'
 
 export interface AuthzResult {
   ok: boolean
@@ -364,12 +361,7 @@ export interface MediaPermissionInput {
  * handler so neither platform path is a bypass.
  */
 export function mediaPermissionDecision(input: MediaPermissionInput): boolean {
-  if (
-    !input.registered ||
-    !input.hasMediaCapability ||
-    !input.requestingUrlIsAppOrigin ||
-    input.isMainFrame !== true
-  ) {
+  if (!input.registered || !input.hasMediaCapability || !input.requestingUrlIsAppOrigin || input.isMainFrame !== true) {
     return false
   }
 

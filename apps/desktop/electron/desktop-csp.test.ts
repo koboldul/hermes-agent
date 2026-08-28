@@ -13,17 +13,15 @@ import {
 const DEV_SERVER = 'http://127.0.0.1:5174'
 
 // The provider script origins SEC-AUDIT-005 forbids, plus generic remote forms.
-const REMOTE_SCRIPT_MARKERS = [
-  'instagram.com',
-  'platform.twitter.com',
-  'tiktok.com',
-  'http:',
-  'https:',
-  '*'
-]
+const REMOTE_SCRIPT_MARKERS = ['instagram.com', 'platform.twitter.com', 'tiktok.com', 'http:', 'https:', '*']
 
 function scriptSrcDirective(policy: string): string {
-  return policy.split(';').map(part => part.trim()).find(part => part.startsWith('script-src ')) ?? ''
+  return (
+    policy
+      .split(';')
+      .map(part => part.trim())
+      .find(part => part.startsWith('script-src ')) ?? ''
+  )
 }
 
 describe('desktop CSP policy', () => {
@@ -84,7 +82,7 @@ describe('withCspHeader', () => {
   test('replaces any upstream CSP with a single enforcing header', () => {
     const merged = withCspHeader(
       {
-        'content-security-policy': ["script-src *"],
+        'content-security-policy': ['script-src *'],
         'Content-Security-Policy-Report-Only': ['default-src *'],
         'X-Frame-Options': ['DENY']
       },

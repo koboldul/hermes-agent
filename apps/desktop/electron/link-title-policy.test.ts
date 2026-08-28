@@ -28,11 +28,26 @@ function portOf(server: http.Server | net.Server): number {
 describe('parseHttpUrl', () => {
   test('accepts http(s) and rejects other schemes / userinfo', () => {
     assert.equal(parseHttpUrl('https://example.com/x').hostname, 'example.com')
-    assert.throws(() => parseHttpUrl('ftp://example.com'), (e: LinkPolicyError) => e.code === 'blocked-scheme')
-    assert.throws(() => parseHttpUrl('file:///etc/passwd'), (e: LinkPolicyError) => e.code === 'blocked-scheme')
-    assert.throws(() => parseHttpUrl('javascript:alert(1)'), (e: LinkPolicyError) => e.code === 'blocked-scheme')
-    assert.throws(() => parseHttpUrl('http://user:pass@example.com'), (e: LinkPolicyError) => e.code === 'has-userinfo')
-    assert.throws(() => parseHttpUrl('not a url'), (e: LinkPolicyError) => e.code === 'invalid-url')
+    assert.throws(
+      () => parseHttpUrl('ftp://example.com'),
+      (e: LinkPolicyError) => e.code === 'blocked-scheme'
+    )
+    assert.throws(
+      () => parseHttpUrl('file:///etc/passwd'),
+      (e: LinkPolicyError) => e.code === 'blocked-scheme'
+    )
+    assert.throws(
+      () => parseHttpUrl('javascript:alert(1)'),
+      (e: LinkPolicyError) => e.code === 'blocked-scheme'
+    )
+    assert.throws(
+      () => parseHttpUrl('http://user:pass@example.com'),
+      (e: LinkPolicyError) => e.code === 'has-userinfo'
+    )
+    assert.throws(
+      () => parseHttpUrl('not a url'),
+      (e: LinkPolicyError) => e.code === 'invalid-url'
+    )
   })
 })
 
@@ -209,7 +224,9 @@ afterEach(async () => {
   }
 })
 
-function startHttpServer(handler: http.RequestListener): Promise<{ port: number; hits: () => number; hostHeaders: () => string[] }> {
+function startHttpServer(
+  handler: http.RequestListener
+): Promise<{ port: number; hits: () => number; hostHeaders: () => string[] }> {
   const hostHeaders: string[] = []
   let hits = 0
 
@@ -553,7 +570,16 @@ describe('fetchThroughPolicy — peer identity fails closed', () => {
 })
 
 describe('ambient proxy / PAC cannot redirect metadata traffic', () => {
-  const PROXY_ENV = ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'NO_PROXY', 'no_proxy']
+  const PROXY_ENV = [
+    'HTTP_PROXY',
+    'HTTPS_PROXY',
+    'ALL_PROXY',
+    'http_proxy',
+    'https_proxy',
+    'all_proxy',
+    'NO_PROXY',
+    'no_proxy'
+  ]
 
   test('an env-configured proxy is ignored; the request hits the pinned host directly', async () => {
     // A "proxy" that records every connection. If node honored the proxy env,

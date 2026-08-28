@@ -571,7 +571,7 @@ function requestOnce(
     }
 
     const isHttps = url.protocol === 'https:'
-    const request = isHttps ? deps.httpsRequest ?? https.request : deps.httpRequest ?? http.request
+    const request = isHttps ? (deps.httpsRequest ?? https.request) : (deps.httpRequest ?? http.request)
     const options = buildRequestOptions(url, pinned, extraHeaders)
 
     let settled = false
@@ -682,7 +682,13 @@ function requestOnce(
     })
 
     req.setTimeout(limits.connectTimeoutMs, () => fail(new LinkPolicyError('timeout')))
-    req.on('error', error => fail(error instanceof LinkPolicyError ? error : new LinkPolicyError('request-failed', String((error as Error)?.message ?? error))))
+    req.on('error', error =>
+      fail(
+        error instanceof LinkPolicyError
+          ? error
+          : new LinkPolicyError('request-failed', String((error as Error)?.message ?? error))
+      )
+    )
     req.end()
   })
 }

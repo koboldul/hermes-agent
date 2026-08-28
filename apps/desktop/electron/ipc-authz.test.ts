@@ -124,7 +124,20 @@ describe('capabilitiesForKind', () => {
     for (const kind of ['primary', 'secondary', 'instance', 'hud'] as const) {
       const caps = capabilitiesForKind(kind)
 
-      for (const cap of ['metadata', 'fs', 'git', 'terminal', 'media', 'connection', 'config', 'update', 'plugin', 'clipboard', 'file', 'system'] as const) {
+      for (const cap of [
+        'metadata',
+        'fs',
+        'git',
+        'terminal',
+        'media',
+        'connection',
+        'config',
+        'update',
+        'plugin',
+        'clipboard',
+        'file',
+        'system'
+      ] as const) {
         assert.ok(caps.has(cap), `chat ${kind} must hold ${cap}`)
       }
     }
@@ -138,7 +151,20 @@ describe('capabilitiesForKind', () => {
     for (const kind of ['quickEntry', 'petOverlay', 'wakeIndicator'] as const) {
       const caps = capabilitiesForKind(kind)
 
-      for (const cap of ['fs', 'git', 'terminal', 'metadata', 'media', 'connection', 'config', 'update', 'plugin', 'clipboard', 'file', 'system'] as const) {
+      for (const cap of [
+        'fs',
+        'git',
+        'terminal',
+        'metadata',
+        'media',
+        'connection',
+        'config',
+        'update',
+        'plugin',
+        'clipboard',
+        'file',
+        'system'
+      ] as const) {
         assert.equal(caps.has(cap), false, `${kind} must NOT hold ${cap}`)
       }
     }
@@ -324,9 +350,15 @@ describe('media permission authorization', () => {
     assert.equal(authorizeMediaPermission(chat, 'media', { requestingUrl: APP_FRAME_URL, isMainFrame: false }), false)
     // Correct window + origin but no main-frame proof → fail closed.
     assert.equal(authorizeMediaPermission(chat, 'media', { requestingUrl: APP_FRAME_URL }), false)
-    assert.equal(authorizeMediaPermission(guest, 'media', { requestingUrl: 'https://evil.example', isMainFrame: true }), false)
+    assert.equal(
+      authorizeMediaPermission(guest, 'media', { requestingUrl: 'https://evil.example', isMainFrame: true }),
+      false
+    )
     // Registered chat window but request from a remote origin (e.g. an embed).
-    assert.equal(authorizeMediaPermission(chat, 'media', { requestingUrl: 'https://evil.example', isMainFrame: true }), false)
+    assert.equal(
+      authorizeMediaPermission(chat, 'media', { requestingUrl: 'https://evil.example', isMainFrame: true }),
+      false
+    )
   })
 
   test('the pet overlay (no media capability) is denied capture', () => {

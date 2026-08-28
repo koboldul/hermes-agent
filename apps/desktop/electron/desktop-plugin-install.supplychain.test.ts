@@ -25,17 +25,23 @@ describe('desktop plugin atomic publication (WP4 item 2: backup + rollback)', ()
     // Staged (new) install.
     await fsp.mkdir(stageDir, { recursive: true })
     await fsp.writeFile(path.join(stageDir, 'plugin.js'), 'NEW\n')
+
     return { root, targetDir, stageDir, backupDir }
   }
 
   test('successful swap replaces the tree and clears the backup', async () => {
     const { root, targetDir, stageDir, backupDir } = await seed()
+
     try {
       const res = await atomicSwapWithRollback({
-        stageDir, targetDir, backupDir, hadExisting: true,
+        stageDir,
+        targetDir,
+        backupDir,
+        hadExisting: true,
         rename: (a, b) => fsp.rename(a, b),
-        rm: (p) => fsp.rm(p, { recursive: true, force: true }).then(() => undefined)
+        rm: p => fsp.rm(p, { recursive: true, force: true }).then(() => undefined)
       })
+
       assert.equal(res.ok, true)
       assert.equal(await fsp.readFile(path.join(targetDir, 'plugin.js'), 'utf8'), 'NEW\n')
     } finally {
@@ -45,20 +51,28 @@ describe('desktop plugin atomic publication (WP4 item 2: backup + rollback)', ()
 
   test('injected rename failure preserves the OLD tree and its metadata', async () => {
     const { root, targetDir, stageDir, backupDir } = await seed()
+
     try {
       let call = 0
+
       const res = await atomicSwapWithRollback({
-        stageDir, targetDir, backupDir, hadExisting: true,
+        stageDir,
+        targetDir,
+        backupDir,
+        hadExisting: true,
         // First rename (target->backup) succeeds; second (stage->target) throws.
         rename: async (a, b) => {
           call += 1
+
           if (call === 2) {
             throw new Error('simulated rename failure')
           }
+
           await fsp.rename(a, b)
         },
-        rm: (p) => fsp.rm(p, { recursive: true, force: true }).then(() => undefined)
+        rm: p => fsp.rm(p, { recursive: true, force: true }).then(() => undefined)
       })
+
       assert.equal(res.ok, false)
       // The old working plugin + metadata must be intact at targetDir.
       assert.equal(await fsp.readFile(path.join(targetDir, 'plugin.js'), 'utf8'), 'OLD\n')
@@ -77,6 +91,7 @@ describe('desktop plugin activation (WP4 item 4: exact ref + expected digest)', 
       computedDigest: 'deadbeef',
       breakGlass: false
     })
+
     assert.equal(d.allow, true)
   })
 
@@ -87,6 +102,7 @@ describe('desktop plugin activation (WP4 item 4: exact ref + expected digest)', 
       computedDigest: 'feedface',
       breakGlass: false
     })
+
     assert.equal(d.allow, false)
     assert.match(d.reason, /digest mismatch/)
   })
@@ -98,6 +114,7 @@ describe('desktop plugin activation (WP4 item 4: exact ref + expected digest)', 
       computedDigest: 'x',
       breakGlass: false
     })
+
     assert.equal(d.allow, false)
   })
 
@@ -108,22 +125,34 @@ describe('desktop plugin activation (WP4 item 4: exact ref + expected digest)', 
       computedDigest: 'x',
       breakGlass: false
     })
+
     assert.equal(d.allow, false)
     assert.match(d.reason, /40-char/)
   })
 
   test('break-glass opt-in activates (labelled unverified)', () => {
-    const d = desktopActivationDecision({ pinnedRef: null, expectedDigest: null, computedDigest: 'x', breakGlass: true })
+    const d = desktopActivationDecision({
+      pinnedRef: null,
+      expectedDigest: null,
+      computedDigest: 'x',
+      breakGlass: true
+    })
     assert.equal(d.allow, true)
   })
 
   test('default (no digest, no break-glass) is denied', () => {
-    const d = desktopActivationDecision({ pinnedRef: null, expectedDigest: null, computedDigest: 'x', breakGlass: false })
+    const d = desktopActivationDecision({
+      pinnedRef: null,
+      expectedDigest: null,
+      computedDigest: 'x',
+      breakGlass: false
+    })
     assert.equal(d.allow, false)
   })
 
   test('desktopBundleDigest is deterministic and mutation-sensitive', async () => {
     const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'hermes-dpd-'))
+
     try {
       await fsp.writeFile(path.join(dir, 'plugin.js'), 'export default {}\n')
       await fsp.mkdir(path.join(dir, 'lib'))
@@ -159,14 +188,20 @@ describe('desktop plugin supply-chain gate', () => {
     assert.equal(supplyChainAllowsUnverified('plugins', withBlock('    enforce: false\n')), false)
     // even with enforce:false, authorization needs the explicit allow-list
     assert.equal(
-      supplyChainAllowsUnverified('plugins', withBlock('    enforce: false\n    allow_unverified_components: ["plugins"]\n')),
+      supplyChainAllowsUnverified(
+        'plugins',
+        withBlock('    enforce: false\n    allow_unverified_components: ["plugins"]\n')
+      ),
       true
     )
   })
 
   test('inline allow-list containing plugins opts in', () => {
     assert.equal(
-      supplyChainAllowsUnverified('plugins', withBlock('    enforce: true\n    allow_unverified_components: ["plugins"]\n')),
+      supplyChainAllowsUnverified(
+        'plugins',
+        withBlock('    enforce: true\n    allow_unverified_components: ["plugins"]\n')
+      ),
       true
     )
   })

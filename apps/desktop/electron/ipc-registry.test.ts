@@ -2,12 +2,7 @@ import assert from 'node:assert/strict'
 
 import { afterEach, describe, test } from 'vitest'
 
-import {
-  __resetIpcAuthz,
-  configureIpcAuthz,
-  IpcAuthorizationError,
-  registerTrustedWindow
-} from './ipc-authz'
+import { __resetIpcAuthz, configureIpcAuthz, IpcAuthorizationError, registerTrustedWindow } from './ipc-authz'
 import { createIpcRegistrar, type IpcMainLike } from './ipc-registry'
 
 const DEV = 'http://127.0.0.1:5174'

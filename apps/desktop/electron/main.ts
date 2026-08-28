@@ -226,19 +226,10 @@ import { snapHudBounds } from './hud-snap'
 import { createHudSnapShortcut } from './hud-snap-shortcut'
 import { buildHudWindowUrl } from './hud-url'
 import { resolveHudWindowing } from './hud-windowing'
-import {
-  authorizeMediaPermission,
-  configureIpcAuthz,
-  registerTrustedWindow
-} from './ipc-authz'
+import { authorizeMediaPermission, configureIpcAuthz, registerTrustedWindow } from './ipc-authz'
 import { capabilityForChannel } from './ipc-channel-policy'
 import { createIpcRegistrar } from './ipc-registry'
-import {
-  fetchTextThroughPolicy,
-  fetchThroughPolicy,
-  LinkPolicyError,
-  type PolicyDeps
-} from './link-title-policy'
+import { fetchTextThroughPolicy, fetchThroughPolicy, LinkPolicyError, type PolicyDeps } from './link-title-policy'
 import { ensureMainWindow } from './main-window-lifecycle'
 import {
   assertManagedUpdatePreflightClear,
@@ -16705,9 +16696,7 @@ appHandle('hermes:stop-find-in-page', event => {
 
 // The renderer can't know whether a loopback URL is reachable — only main
 // knows which transport backs this gateway. Ask before loading one.
-appHandle('hermes:preview:reach', async (event, url) =>
-  reachablePreviewUrl(event.sender.id, String(url || ''))
-)
+appHandle('hermes:preview:reach', async (event, url) => reachablePreviewUrl(event.sender.id, String(url || '')))
 
 appHandle('hermes:openPreviewInBrowser', async (_event, url) => {
   if (!(await openPreviewInBrowser(url))) {

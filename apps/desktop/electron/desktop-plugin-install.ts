@@ -399,39 +399,53 @@ async function copyDesktopTree(sourceDir: string, targetDir: string): Promise<vo
 function extractSupplyChainBlock(text: string): string | null {
   const lines = text.split(/\r?\n/)
   const start = lines.findIndex(l => /^\s*supply_chain\s*:/.test(l))
+
   if (start < 0) {
     return null
   }
+
   const indent = lines[start].match(/^(\s*)/)?.[1].length ?? 0
   const out: string[] = []
+
   for (let j = start + 1; j < lines.length; j++) {
     const line = lines[j]
+
     if (line.trim() === '') {
       out.push(line)
+
       continue
     }
+
     const lineIndent = line.match(/^(\s*)/)?.[1].length ?? 0
+
     if (lineIndent <= indent) {
       break
     }
+
     out.push(line)
   }
+
   return out.join('\n')
 }
 
 export function supplyChainAllowsUnverified(component: string, configText: string): boolean {
   const block = extractSupplyChainBlock(configText)
+
   if (!block) {
     return false
   }
+
   // `enforce: false` alone must NOT authorize (WP4 item 5): authorization
   // always requires the explicit per-component allow-list (or the "*" sentinel).
   const listMatch = block.match(/allow_unverified_components\s*:\s*(\[[^\]]*\]|(?:\r?\n\s+-\s+[^\r\n]+)+)/i)
+
   if (!listMatch) {
     return false
   }
+
   const listText = listMatch[1].toLowerCase()
   const wanted = component.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
   return new RegExp(`(^|[\\[,"'\\s-])(${wanted}|\\*)([\\],"'\\s]|$)`).test(listText)
 }
 
@@ -439,6 +453,7 @@ function desktopPluginInstallAllowed(): boolean {
   try {
     const home = process.env.HERMES_HOME || path.join(os.homedir(), '.hermes')
     const text = fs.readFileSync(path.join(home, 'config.yaml'), 'utf8')
+
     return supplyChainAllowsUnverified('plugins', text)
   } catch {
     return false
@@ -457,15 +472,20 @@ const _SHA40 = /^[0-9a-f]{40}$/i
 export async function desktopBundleDigest(dir: string): Promise<string> {
   const crypto = await import('node:crypto')
   const entries: string[] = []
+
   async function walk(cur: string, rel: string): Promise<void> {
     const items = await fsp.readdir(cur, { withFileTypes: true })
+
     for (const it of items) {
       const relPath = rel ? `${rel}/${it.name}` : it.name
       const parts = relPath.split('/')
+
       if (parts.includes('.git') || parts.includes('__pycache__') || parts.includes('node_modules')) {
         continue
       }
+
       const abs = path.join(cur, it.name)
+
       if (it.isDirectory()) {
         await walk(abs, relPath)
       } else if (it.isFile()) {
@@ -473,15 +493,18 @@ export async function desktopBundleDigest(dir: string): Promise<string> {
       }
     }
   }
+
   await walk(dir, '')
   entries.sort()
   const top = crypto.createHash('sha256')
+
   for (const rel of entries) {
     top.update(rel, 'utf8')
     top.update(Buffer.from([0]))
     const buf = await fsp.readFile(path.join(dir, ...rel.split('/'))).catch(() => Buffer.from([0]))
     top.update(crypto.createHash('sha256').update(buf).digest())
   }
+
   return top.digest('hex')
 }
 
@@ -500,21 +523,26 @@ export interface DesktopActivationInputs {
  */
 export function desktopActivationDecision(inputs: DesktopActivationInputs): { allow: boolean; reason: string } {
   const { pinnedRef, expectedDigest, computedDigest, breakGlass } = inputs
+
   if (pinnedRef && expectedDigest) {
     if (!_SHA40.test(pinnedRef)) {
       return { allow: false, reason: `pinned ref ${pinnedRef} is not a 40-char commit SHA` }
     }
+
     if (expectedDigest.toLowerCase() !== computedDigest.toLowerCase()) {
       return {
         allow: false,
         reason: `whole-bundle digest mismatch (expected ${expectedDigest.slice(0, 12)}…, got ${computedDigest.slice(0, 12)}…)`
       }
     }
+
     return { allow: true, reason: 'exact ref + expected digest verified' }
   }
+
   if (breakGlass) {
     return { allow: true, reason: 'explicit break-glass opt-in (unverified)' }
   }
+
   return {
     allow: false,
     reason:
@@ -550,19 +578,25 @@ export async function atomicSwapWithRollback(
 ): Promise<{ ok: boolean; movedAside: boolean; error?: string }> {
   const { stageDir, targetDir, backupDir, hadExisting, rename, rm } = args
   let movedAside = false
+
   try {
     if (hadExisting) {
       await rename(targetDir, backupDir)
       movedAside = true
     }
+
     await rename(stageDir, targetDir)
+
     return { ok: true, movedAside }
   } catch (err) {
     await rm(targetDir).catch(() => undefined)
+
     if (movedAside) {
       await rename(backupDir, targetDir).catch(() => undefined)
     }
+
     await rm(stageDir).catch(() => undefined)
+
     return { ok: false, movedAside: false, error: err instanceof Error ? err.message : String(err) }
   }
 }
@@ -579,6 +613,7 @@ export async function installDesktopPluginFromGit(
     const expectedDigest = opts.expectedDigest ?? null
     const breakGlass = desktopPluginInstallAllowed()
     const hasPinnedPath = Boolean(pinnedRef && expectedDigest)
+
     // Supply-chain gate (WP4): remote code activation is disabled by default.
     // Proceed to clone only when a verified path is possible: an exact ref +
     // expected digest, or an explicit break-glass opt-in. Otherwise fail closed
@@ -594,13 +629,16 @@ export async function installDesktopPluginFromGit(
           'See docs/security/supply-chain-migration.md.'
       }
     }
+
     const { gitUrl, subdir } = resolvePluginGitUrl(identifier)
     const cloneRoot = await cloneToTemp(gitBin, gitUrl)
+
     // Check out the exact pinned commit so the computed digest reflects that
     // ref (a drifted HEAD then simply mismatches the expected digest and fails
     // closed). Best-effort fetch for the shallow clone.
     if (pinnedRef && _SHA40.test(pinnedRef)) {
       const fetched = await runGit(gitBin, ['-C', cloneRoot, 'fetch', '--depth', '1', 'origin', pinnedRef])
+
       if (fetched.code === 0) {
         await runGit(gitBin, ['-C', cloneRoot, 'checkout', '--force', pinnedRef])
       } else {
@@ -625,6 +663,7 @@ export async function installDesktopPluginFromGit(
       // digest activates without break-glass; otherwise break-glass is required.
       const computedDigest = await desktopBundleDigest(sourceDir)
       const decision = desktopActivationDecision({ pinnedRef, expectedDigest, computedDigest, breakGlass })
+
       if (!decision.allow) {
         return { ok: false, error: `Refusing to activate desktop plugin: ${decision.reason}` }
       }
@@ -634,6 +673,7 @@ export async function installDesktopPluginFromGit(
       const targetPlugin = path.join(targetDir, 'plugin.js')
 
       const hadExisting = (await pathIsDirectory(targetDir)) || (await pathIsFile(targetPlugin))
+
       if (hadExisting && !force) {
         return {
           ok: false,
@@ -651,34 +691,41 @@ export async function installDesktopPluginFromGit(
       const backupDir = `${targetDir}.backup-${stamp}`
       await fsp.rm(stageDir, { recursive: true, force: true }).catch(() => undefined)
       await copyDesktopTree(sourceDir, stageDir)
+
       if (!(await pathIsFile(path.join(stageDir, 'plugin.js')))) {
         await fsp.rm(stageDir, { recursive: true, force: true }).catch(() => undefined)
+
         return { ok: false, error: `Install staged but plugin.js is missing — previous install untouched.` }
       }
 
       let movedAside = false
+
       const swap = await atomicSwapWithRollback({
         stageDir,
         targetDir,
         backupDir,
         hadExisting,
         rename: (a, b) => fsp.rename(a, b),
-        rm: (p) => fsp.rm(p, { recursive: true, force: true }).then(() => undefined)
+        rm: p => fsp.rm(p, { recursive: true, force: true }).then(() => undefined)
       })
+
       if (!swap.ok) {
         return {
           ok: false,
           error: `Desktop plugin install failed (${swap.error}); the previous ${pluginName} install was preserved.`
         }
       }
+
       movedAside = swap.movedAside
 
       if (!(await pathIsFile(targetPlugin))) {
         // Published tree is broken — restore the backup and fail closed.
         await fsp.rm(targetDir, { recursive: true, force: true }).catch(() => undefined)
+
         if (movedAside) {
           await fsp.rename(backupDir, targetDir).catch(() => undefined)
         }
+
         return { ok: false, error: `Install completed but ${targetPlugin} is missing — previous install restored.` }
       }
 

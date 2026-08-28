@@ -132,7 +132,9 @@ interface OnHeadersReceivedDetails {
 }
 
 interface WebRequestLike {
-  onHeadersReceived: (listener: (details: OnHeadersReceivedDetails, callback: (response: { responseHeaders?: HeaderMap }) => void) => void) => void
+  onHeadersReceived: (
+    listener: (details: OnHeadersReceivedDetails, callback: (response: { responseHeaders?: HeaderMap }) => void) => void
+  ) => void
 }
 
 interface SessionLike {

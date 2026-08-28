@@ -9,7 +9,13 @@ const IFRAME_WINDOW = { name: 'hub-iframe' } as unknown
 const ctx = { expectedOrigin: ORIGIN, expectedSource: IFRAME_WINDOW }
 
 function pick(overrides: Record<string, unknown> = {}) {
-  return { type: 'hermes-skill-pick', name: 'Weather', identifier: 'official/weather', source: 'official', ...overrides }
+  return {
+    type: 'hermes-skill-pick',
+    name: 'Weather',
+    identifier: 'official/weather',
+    source: 'official',
+    ...overrides
+  }
 }
 
 describe('evaluateHubMessage (A4 XPIA)', () => {
@@ -32,7 +38,9 @@ describe('evaluateHubMessage (A4 XPIA)', () => {
   })
 
   it('rejects a null / missing source window', () => {
-    expect(evaluateHubMessage({ origin: ORIGIN, source: IFRAME_WINDOW, data: pick() }, { ...ctx, expectedSource: null })).toBeNull()
+    expect(
+      evaluateHubMessage({ origin: ORIGIN, source: IFRAME_WINDOW, data: pick() }, { ...ctx, expectedSource: null })
+    ).toBeNull()
     expect(evaluateHubMessage({ origin: ORIGIN, source: null, data: pick() }, ctx)).toBeNull()
   })
 
@@ -40,7 +48,10 @@ describe('evaluateHubMessage (A4 XPIA)', () => {
     expect(evaluateHubMessage({ origin: 'https://evil.example', source: IFRAME_WINDOW, data: pick() }, ctx)).toBeNull()
     // Even a look-alike subdomain is not the exact origin.
     expect(
-      evaluateHubMessage({ origin: 'https://hermes-agent.nousresearch.com.evil.example', source: IFRAME_WINDOW, data: pick() }, ctx)
+      evaluateHubMessage(
+        { origin: 'https://hermes-agent.nousresearch.com.evil.example', source: IFRAME_WINDOW, data: pick() },
+        ctx
+      )
     ).toBeNull()
   })
 

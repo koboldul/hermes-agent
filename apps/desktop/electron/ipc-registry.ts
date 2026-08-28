@@ -33,7 +33,12 @@ export interface IpcRegistrar {
   on: (channel: string, capability: Capability, handler: (event: any, ...args: any[]) => void) => void
   /** Guarded synchronous `ipcMain.on` (`event.returnValue`). Returns `safeDefault`
    *  to unauthorized senders. The handler MUST return its value. */
-  sync: (channel: string, capability: Capability, handler: (event: any, ...args: any[]) => any, safeDefault?: unknown) => void
+  sync: (
+    channel: string,
+    capability: Capability,
+    handler: (event: any, ...args: any[]) => any,
+    safeDefault?: unknown
+  ) => void
   /** Explicitly-public, unguarded invoke channel. */
   publicHandle: (channel: string, handler: (event: any, ...args: any[]) => any) => void
   /** Explicitly-public, unguarded fire-and-forget channel. */
